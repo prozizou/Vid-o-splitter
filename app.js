@@ -187,8 +187,9 @@ async function getFFmpeg() {
     progressBar.style.width = `${Math.round(p * 100)}%`;
   });
 
-  // Core mono-thread : ne nécessite PAS SharedArrayBuffer ni en-têtes COOP/COEP
-  const base = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
+  // Le worker est un module ES → il importe le core via import().
+  // Il faut donc le core au format ESM (dist/esm), pas UMD (sinon "failed to import").
+  const base = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
 
   // Chaque étape est journalisée séparément : si ça bloque, on saura LAQUELLE.
   log('⬇️ [1/4] Préparation du worker...');
