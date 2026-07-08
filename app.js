@@ -17,7 +17,7 @@ const CONFIG = {
 const $ = id => document.getElementById(id);
 const dropZone = $('dropZone'), fileInput = $('fileInput'), processBtn = $('processBtn');
 const statusDiv = $('status'), progressContainer = $('progressContainer'), progressBar = $('progressBar');
-const logOutput = $('logOutput'), downloadLink = $('downloadLink');
+const logOutput = $('logOutput'), downloadLink = $('downloadLink'), preview = $('preview');
 
 let videoFile = null;
 let currentURL = null;   // pour révoquer l'ancien blob
@@ -49,7 +49,15 @@ function handleFile() {
   videoFile = file;
   setStatus(`✅ Vidéo chargée : ${file.name} (${(file.size / 1048576).toFixed(1)} Mo)`);
   processBtn.disabled = false;
+  hideResult();
+}
+
+function hideResult() {
   downloadLink.classList.add('hidden');
+  preview.pause();
+  preview.removeAttribute('src');
+  preview.load();
+  preview.classList.add('hidden');
 }
 
 function setStatus(msg, cls = '') { statusDiv.className = cls; statusDiv.textContent = msg; }
@@ -206,6 +214,12 @@ async function processWithFFmpeg(segments) {
 
   if (currentURL) URL.revokeObjectURL(currentURL); // évite les fuites entre 2 traitements
   currentURL = URL.createObjectURL(new Blob([data.buffer], { type: 'video/mp4' }));
+
+  // Prévisualisation : on joue le rendu AVANT tout export
+  preview.src = currentURL;
+  preview.classList.remove('hidden');
+  preview.load();
+
   downloadLink.href = currentURL;
   downloadLink.classList.remove('hidden');
 }
@@ -214,7 +228,7 @@ async function processWithFFmpeg(segments) {
 processBtn.addEventListener('click', async () => {
   if (!videoFile) return;
   processBtn.disabled = true;
-  downloadLink.classList.add('hidden');
+  hideResult();
   logOutput.classList.add('hidden'); logOutput.textContent = '';
   progressContainer.classList.remove('hidden'); progressBar.style.width = '0%';
   setStatus('🔍 Analyse audio en cours...');
