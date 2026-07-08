@@ -1,109 +1,71 @@
-# 🪓 Video Silence Cutter
+# 🪓 Video Silence Cutter (v2 — multi-thread)
 
-Outil 100 % navigateur qui détecte et supprime les silences d'une vidéo.
-Aucun serveur de traitement : tout se passe dans le navigateur du visiteur
-(Web Audio API pour la détection + ffmpeg.wasm pour le découpage).
+Outil 100 % navigateur qui détecte et supprime les silences d'une vidéo, puis
+réassemble une vidéo compacte. Aucun serveur de traitement : tout se passe dans
+le navigateur (Web Audio API pour la détection + ffmpeg.wasm pour le montage).
 
-## Structure du projet
+## Ce qui change dans la v2
 
-```
-vercel-silence-cutter/
-├── index.html      → la page
-├── style.css       → les styles
-├── app.js          → toute la logique (module ES)
-├── vercel.json     → config Vercel (statique)
-└── README.md
-```
+- **Multi-thread** : ffmpeg utilise tous les cœurs du téléphone -> beaucoup plus
+  rapide sur les vidéos longues. Bascule automatique en mono-thread si
+  l'isolation cross-origin n'est pas disponible.
+- **Auto-hébergement de ffmpeg** : les fichiers ffmpeg ne sont plus chargés
+  depuis un CDN au runtime. Ils sont téléchargés **pendant le build Vercel**
+  (côté serveur) et servis depuis votre propre domaine (/vendor/...). Cela :
+  - active le multi-thread (en-têtes COOP/COEP, incompatibles avec les CDN) ;
+  - supprime les pannes de CDN qu'on subissait (404, worker cross-origin...) ;
+  - évite tout upload manuel de 30 Mo depuis le téléphone.
 
-C'est un site **100 % statique** : pas de build, pas de backend.
+## Structure
 
-## Déployer sur Vercel
+    index.html   -> page
+    style.css    -> styles
+    app.js       -> logique (module ES, imports depuis /vendor)
+    build.sh     -> telecharge ffmpeg dans dist/vendor pendant le build
+    vercel.json  -> build + outputDirectory + en-tetes COOP/COEP
+    package.json
+    README.md
 
-### Option A — via GitHub (recommandé)
-1. Créez un dépôt GitHub et poussez ces fichiers à la racine.
-2. Sur https://vercel.com → **Add New → Project → Import** votre dépôt.
-3. Framework Preset : **Other** (aucun build). Laissez les champs vides.
-4. **Deploy**. Vercel vous donne une URL en `https://...vercel.app`.
+Au build, dist/ contient la page ET dist/vendor/ avec :
+ffmpeg/ (classe + worker), util/, core-st/ (mono-thread), core-mt/ (multi-thread).
 
-### Option B — via la CLI Vercel
-```bash
-npm i -g vercel        # une seule fois
-cd vercel-silence-cutter
-vercel                 # déploiement de preview
-vercel --prod          # déploiement en production
-```
+## Deployer sur Vercel
 
-### Option C — glisser-déposer
-Sur le tableau de bord Vercel, vous pouvez aussi déposer directement le dossier.
+Le vercel.json configure tout (build + en-tetes). Il suffit d'importer le depot :
 
-## Pourquoi ça marche sur Vercel
+1. Poussez ces fichiers a la racine d'un depot GitHub.
+2. Sur https://vercel.com -> Add New -> Project -> Import.
+3. Framework Preset : Other. Ne touchez pas aux commandes : Vercel lit
+   vercel.json (Build = bash build.sh, Output = dist).
+4. Deploy. Le build telecharge ffmpeg puis publie le site.
 
-- Vercel sert le site en **HTTPS**, ce qui autorise les modules ES et
-  ffmpeg.wasm (impossible en `file://`).
-- On utilise le **core mono-thread** de ffmpeg, qui ne nécessite PAS
-  les en-têtes `Cross-Origin-Opener-Policy` / `Embedder-Policy`.
-  ⚠️ N'ajoutez donc PAS ces en-têtes : ils bloqueraient le chargement
-  de ffmpeg depuis le CDN (unpkg / esm.sh).
-- ffmpeg.wasm (~30 Mo) est téléchargé une fois puis mis en cache par le
-  navigateur.
+Verifiez dans les logs de build la ligne « Contenu de dist/vendor » : les
+fichiers ffmpeg-core.wasm (core-st ET core-mt) doivent apparaitre.
 
-## Réglages (curseurs dans l'interface)
+### Verifier que le multi-thread est actif
+Une fois en ligne, ouvrez la console et tapez : crossOriginIsolated
+- true  -> multi-thread actif (journal : « Mode multi-thread active »).
+- false -> en-tetes COOP/COEP non appliques ; l'app tourne en mono-thread.
+  Verifiez que vercel.json est bien a la racine et redeployez.
 
-- **Sensibilité** : plus haut = garde les passages parlés plus doux.
-- **Silence minimum** : un blanc plus court n'est pas coupé.
-- **Marge conservée** : petit coussin de temps avant/après chaque phrase,
-  pour ne pas rogner le début/fin des mots.
+## Reglages (curseurs)
 
-## ⚠️ Fiabilité & vitesse sur mobile (à lire si ça « bloque »)
+- Sensibilite : plus haut = garde les passages parles plus doux.
+- Silence minimum : un blanc plus court n'est pas coupe. Sur une video
+  longue, MONTEZ-LE (0,5-1 s) pour reduire le nombre de segments.
+- Marge conservee : coussin de temps avant/apres chaque phrase.
 
-Le traitement se fait entièrement dans le navigateur du téléphone, avec un
-ffmpeg **mono-thread** (le seul qui fonctionne sans configuration serveur
-spéciale). Conséquences :
+## Conseils pour les videos longues (votre cas d'usage)
 
-- **Le chargement peut se figer** si le worker ffmpeg ne s'initialise pas
-  (limitation connue du chargement via CDN sur certains navigateurs mobiles).
-  Le code journalise désormais chaque étape ([1/4]…[4/4]) et abandonne avec un
-  message clair au lieu de tourner indéfiniment. Regardez la dernière ligne du
-  journal pour savoir OÙ ça coince.
-- **L'encodage est lent** : réencoder une vidéo de plusieurs minutes découpée
-  en dizaines/centaines de segments peut prendre de longues minutes, voire
-  saturer la mémoire du navigateur (limite ~2 Go côté WASM).
+1. Le multi-thread accelere l'encodage d'un facteur ~= nombre de coeurs, mais
+   reencoder plusieurs dizaines de minutes reste intensif. Gardez le telephone
+   BRANCHE.
+2. Augmentez « Silence minimum » pour limiter le nombre de segments.
+3. La memoire du navigateur (~2-4 Go) est la vraie limite : une video tres
+   longue et tres lourde peut echouer. Dans ce cas, decoupez-la en 2-3 parties.
+4. Faites un premier essai sur un extrait court pour valider vos reglages.
 
-### Bons réflexes
-1. **Testez d'abord un clip court** (10–20 s) pour valider toute la chaîne
-   avant de lancer une vidéo de 5 min.
-2. Augmentez « Silence minimum » (ex. 0,5–0,8 s) pour réduire le nombre de
-   segments : moins de segments = encodage beaucoup plus léger.
-3. Gardez le téléphone branché : l'encodage est intensif (la batterie chute).
+## Confidentialite
 
-### Pour une vraie vitesse (version multi-thread)
-La version multi-thread de ffmpeg utilise tous les cœurs du téléphone, mais
-elle exige que le site soit « cross-origin isolated ». Sur Vercel il faut :
-
-1. Ajouter ces en-têtes dans `vercel.json` :
-   ```json
-   {
-     "headers": [{
-       "source": "/(.*)",
-       "headers": [
-         { "key": "Cross-Origin-Opener-Policy",   "value": "same-origin" },
-         { "key": "Cross-Origin-Embedder-Policy",  "value": "require-corp" }
-       ]
-     }]
-   }
-   ```
-2. **Auto-héberger** les fichiers ffmpeg (le CDN est bloqué par ces en-têtes) :
-   déposez `ffmpeg-core.js`, `ffmpeg-core.wasm`, `ffmpeg-core.worker.js` et le
-   `worker.js` de `@ffmpeg/ffmpeg` dans un dossier `public/ffmpeg/`, puis
-   chargez-les via des chemins locaux (`/ffmpeg/...`) au lieu des URL CDN.
-
-C'est plus rapide mais plus lourd à mettre en place. Dites-le-moi si vous
-voulez que je prépare cette variante clé en main.
-
-## Limites connues
-
-- Core mono-thread → plus lent que le multi-thread. Préférez des clips courts.
-- Réencodage H.264/AAC systématique (les coupes ne tombent pas sur des
-  images-clés) : c'est l'étape la plus lente.
-- Beaucoup de segments = traitement lourd : augmentez « silence minimum ».
-- Les gros fichiers sont limités par la mémoire du navigateur (~2 Go côté WASM).
+Tout reste sur l'appareil : la video n'est jamais envoyee sur un serveur.
+Seuls les fichiers du moteur ffmpeg sont servis par votre domaine Vercel.

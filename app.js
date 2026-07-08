@@ -1,5 +1,5 @@
-import { FFmpeg } from 'https://esm.sh/@ffmpeg/ffmpeg@0.12.10';
-import { fetchFile, toBlobURL } from 'https://esm.sh/@ffmpeg/util@0.12.1';
+import { FFmpeg } from '/vendor/ffmpeg/index.js';
+import { fetchFile } from '/vendor/util/index.js';
 
 // ==================== CONFIGURATION ====================
 const CONFIG = {
@@ -10,8 +10,11 @@ const CONFIG = {
   sensitivity:   1.0,    // multiplicateur du seuil adaptatif (slider)
   audioFadeSec:  0.008,  // micro-fondu anti-clic à chaque raccord
   absFloor:      0.004,  // plancher d'amplitude absolu
+  crf:           23,     // qualité vidéo (slider) : bas = meilleure qualité
   maxSegments:   500     // au-delà, on prévient (filter_complex trop lourd)
 };
+
+const LONG_VIDEO_SEC = 1800; // 30 min : au-delà, avertissement mémoire
 
 // ==================== DOM ====================
 const $ = id => document.getElementById(id);
@@ -32,6 +35,12 @@ const bind = (id, valId, fmt, key) => {
 bind('sens', 'sensVal', v => `${(+v).toFixed(1)}×`, 'sensitivity');
 bind('sil',  'silVal',  v => `${(+v).toFixed(2)} s`, 'minSilenceDur');
 bind('pad',  'padVal',  v => `${(+v).toFixed(2)} s`, 'padding');
+bind('crf',  'crfVal',  v => {
+  const n = +v;
+  if (n <= 20) return 'Haute (fichier + gros)';
+  if (n <= 25) return 'Équilibrée';
+  return 'Légère (fichier + petit)';
+}, 'crf');
 
 // ==================== FICHIER ====================
 dropZone.addEventListener('click', () => fileInput.click());
@@ -50,6 +59,28 @@ function handleFile() {
   setStatus(`✅ Vidéo chargée : ${file.name} (${(file.size / 1048576).toFixed(1)} Mo)`);
   processBtn.disabled = false;
   hideResult();
+  probeAndWarn(file); // avertissement mémoire pour les vidéos longues
+}
+
+// Lit juste les métadonnées (pas tout le fichier) pour connaître la durée.
+function probeDuration(file) {
+  return new Promise(resolve => {
+    const v = document.createElement('video');
+    const u = URL.createObjectURL(file);
+    v.preload = 'metadata';
+    v.onloadedmetadata = () => { URL.revokeObjectURL(u); resolve(v.duration || 0); };
+    v.onerror = () => { URL.revokeObjectURL(u); resolve(0); };
+    v.src = u;
+  });
+}
+
+async function probeAndWarn(file) {
+  const dur = await probeDuration(file);
+  if (videoFile !== file) return; // un autre fichier a été chargé entre-temps
+  if (dur > LONG_VIDEO_SEC) {
+    const min = Math.round(dur / 60);
+    setStatus(`⚠️ Vidéo de ~${min} min : le traitement peut être long et saturer la mémoire du navigateur. Envisagez de la découper en 2–3 parties.`, 'warn');
+  }
 }
 
 function hideResult() {
@@ -71,6 +102,7 @@ function log(msg) {
 // Renvoie une liste de segments [start, end] à CONSERVER.
 async function detectSegments(onProgress) {
   const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  if (!AudioCtx) throw new Error("Ce navigateur ne supporte pas l'analyse audio (AudioContext). Essayez Chrome ou Edge à jour.");
   const audioCtx = new AudioCtx();
   let audioBuffer;
   try {
@@ -147,37 +179,16 @@ async function detectSegments(onProgress) {
   return { segments: final, duration: dur, kept, threshold: thr };
 }
 
-// Construit une URL de worker même-origine (blob) à partir du VRAI fichier
-// publié (chemin stable), avec réécriture des imports relatifs + CDN de secours.
-// Évite le chemin volatil d'esm.sh (ex. /es2022/worker.js) qui peut renvoyer 404.
-const WORKER_DIRS = [
-  'https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/esm',
-  'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm',
-];
-async function makeClassWorkerURL() {
-  let lastErr;
-  for (const dir of WORKER_DIRS) {
-    try {
-      const res = await fetch(`${dir}/worker.js`);
-      if (!res.ok) { lastErr = new Error(`${res.status} sur ${dir}`); continue; }
-      let code = await res.text();
-      // Le blob perd son URL de base → on absolutise les imports relatifs.
-      code = code.replace(/(\bfrom\s*|\bimport\s*)(["'])\.\/([^"']+)\2/g, `$1$2${dir}/$3$2`);
-      code = code.replace(/import\(\s*(["'])\.\/([^"']+)\1\s*\)/g, `import($1${dir}/$2$1)`);
-      return URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
-    } catch (e) { lastErr = e; }
-  }
-  throw new Error('Worker ffmpeg introuvable sur les CDN. ' + (lastErr?.message || ''));
-}
-
-// Empêche un blocage infini : rejette si une étape dépasse le délai imparti.
+// Empêche un blocage infini : rejette si l'initialisation dépasse le délai.
 function withTimeout(promise, ms, message) {
   let t;
   const timeout = new Promise((_, rej) => { t = setTimeout(() => rej(new Error(message)), ms); });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(t));
 }
 
-// ==================== FFMPEG (API 0.12.x) ====================
+let usingMT = false;
+
+// ==================== FFMPEG (fichiers auto-hébergés, same-origin) ====================
 async function getFFmpeg() {
   if (ffmpeg) return ffmpeg;
   ffmpeg = new FFmpeg();
@@ -187,33 +198,25 @@ async function getFFmpeg() {
     progressBar.style.width = `${Math.round(p * 100)}%`;
   });
 
-  // Le worker est un module ES → il importe le core via import().
-  // Il faut donc le core au format ESM (dist/esm), pas UMD (sinon "failed to import").
-  const base = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
+  // Multi-thread possible UNIQUEMENT si la page est « cross-origin isolated »
+  // (en-têtes COOP/COEP servis par Vercel). Sinon on retombe sur le mono-thread.
+  usingMT = (self.crossOriginIsolated === true);
+  const coreDir = usingMT ? '/vendor/core-mt' : '/vendor/core-st';
+  log(usingMT
+    ? '⚡ Mode multi-thread activé (tous les cœurs).'
+    : 'ℹ️ Mode mono-thread (isolation cross-origin absente — voir README).');
 
-  // Chaque étape est journalisée séparément : si ça bloque, on saura LAQUELLE.
-  log('⬇️ [1/4] Préparation du worker...');
-  const classWorkerURL = await withTimeout(
-    makeClassWorkerURL(), 60000,
-    'Échec de préparation du worker (réseau/CDN). Réessayez avec une meilleure connexion.'
-  );
+  const opts = {
+    classWorkerURL: '/vendor/ffmpeg/worker.js',
+    coreURL: `${coreDir}/ffmpeg-core.js`,
+    wasmURL: `${coreDir}/ffmpeg-core.wasm`,
+  };
+  if (usingMT) opts.workerURL = `${coreDir}/ffmpeg-core.worker.js`;
 
-  log('⬇️ [2/4] Téléchargement du core...');
-  const coreURL = await withTimeout(
-    toBlobURL(`${base}/ffmpeg-core.js`, 'text/javascript'), 60000,
-    'Échec du téléchargement du core (réseau/CDN).'
-  );
-
-  log('⬇️ [3/4] Téléchargement du moteur wasm (~30 Mo, patientez)...');
-  const wasmURL = await withTimeout(
-    toBlobURL(`${base}/ffmpeg-core.wasm`, 'application/wasm'), 180000,
-    'Le téléchargement du moteur (~30 Mo) a expiré. Connexion trop lente ou instable.'
-  );
-
-  log('⚙️ [4/4] Initialisation du moteur...');
+  log('⚙️ Initialisation du moteur ffmpeg...');
   await withTimeout(
-    ffmpeg.load({ classWorkerURL, coreURL, wasmURL }), 120000,
-    "L'initialisation a expiré (worker figé sur ce navigateur). Voir README → « Fiabilité sur mobile »."
+    ffmpeg.load(opts), 120000,
+    "L'initialisation de ffmpeg a expiré. Vérifiez que le dossier /vendor a bien été généré au build."
   );
   log('✅ ffmpeg prêt.');
   return ffmpeg;
@@ -242,12 +245,13 @@ async function processWithFFmpeg(segments) {
   await ff.writeFile(inName, await fetchFile(videoFile));
   const filter = buildFilter(segments);
 
-  log(`✂️ Assemblage de ${segments.length} segment(s)...`);
+  log(`✂️ Assemblage de ${segments.length} segment(s)${usingMT ? ' (multi-thread)' : ''}...`);
   await ff.exec([
     '-i', inName,
     '-filter_complex', filter,
     '-map', '[outv]', '-map', '[outa]',
-    '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23',
+    '-threads', '0',
+    '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', String(CONFIG.crf),
     '-c:a', 'aac', '-b:a', '128k',
     '-movflags', '+faststart',
     'output.mp4'
