@@ -65,6 +65,20 @@ Une fois en ligne, ouvrez la console et tapez : crossOriginIsolated
    longue et tres lourde peut echouer. Dans ce cas, decoupez-la en 2-3 parties.
 4. Faites un premier essai sur un extrait court pour valider vos reglages.
 
+
+## Installer comme application (PWA)
+
+Une fois le site en ligne sur Vercel (HTTPS) :
+
+- Android / Chrome : menu ... -> « Installer l'application » (ou « Ajouter a
+  l'ecran d'accueil »). Une icone adaptative apparait, l'app s'ouvre en plein
+  ecran, sans barre de navigateur.
+- iOS / Safari : bouton Partager -> « Sur l'ecran d'accueil ».
+- Bureau / Chrome-Edge : icone d'installation dans la barre d'adresse.
+
+Grace au service worker, l'app fonctionne hors-ligne des la 2e ouverture
+(le moteur ffmpeg est mis en cache au premier traitement).
+
 ## Confidentialite
 
 Tout reste sur l'appareil : la video n'est jamais envoyee sur un serveur.
