@@ -147,29 +147,73 @@ async function detectSegments(onProgress) {
   return { segments: final, duration: dur, kept, threshold: thr };
 }
 
+// Construit une URL de worker même-origine (blob) à partir du VRAI fichier
+// publié (chemin stable), avec réécriture des imports relatifs + CDN de secours.
+// Évite le chemin volatil d'esm.sh (ex. /es2022/worker.js) qui peut renvoyer 404.
+const WORKER_DIRS = [
+  'https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/esm',
+  'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm',
+];
+async function makeClassWorkerURL() {
+  let lastErr;
+  for (const dir of WORKER_DIRS) {
+    try {
+      const res = await fetch(`${dir}/worker.js`);
+      if (!res.ok) { lastErr = new Error(`${res.status} sur ${dir}`); continue; }
+      let code = await res.text();
+      // Le blob perd son URL de base → on absolutise les imports relatifs.
+      code = code.replace(/(\bfrom\s*|\bimport\s*)(["'])\.\/([^"']+)\2/g, `$1$2${dir}/$3$2`);
+      code = code.replace(/import\(\s*(["'])\.\/([^"']+)\1\s*\)/g, `import($1${dir}/$2$1)`);
+      return URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
+    } catch (e) { lastErr = e; }
+  }
+  throw new Error('Worker ffmpeg introuvable sur les CDN. ' + (lastErr?.message || ''));
+}
+
+// Empêche un blocage infini : rejette si une étape dépasse le délai imparti.
+function withTimeout(promise, ms, message) {
+  let t;
+  const timeout = new Promise((_, rej) => { t = setTimeout(() => rej(new Error(message)), ms); });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(t));
+}
+
 // ==================== FFMPEG (API 0.12.x) ====================
 async function getFFmpeg() {
   if (ffmpeg) return ffmpeg;
-  log('🔄 Chargement de ffmpeg.wasm (~30 Mo au premier lancement)...');
   ffmpeg = new FFmpeg();
   ffmpeg.on('log', ({ message }) => { if (!message.includes('frame=')) log(message); });
   ffmpeg.on('progress', ({ progress }) => {
     const p = Math.max(0, Math.min(1, progress || 0));
     progressBar.style.width = `${Math.round(p * 100)}%`;
   });
+
   // Core mono-thread : ne nécessite PAS SharedArrayBuffer ni en-têtes COOP/COEP
   const base = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
-  // IMPORTANT : chargé depuis un CDN, ffmpeg tente de créer son Worker sur une
-  // AUTRE origine (esm.sh) → interdit par le navigateur. On télécharge donc le
-  // worker et on le passe en blob (même origine) via classWorkerURL.
-  const workerURL = await toBlobURL(
-    'https://esm.sh/@ffmpeg/ffmpeg@0.12.10/es2022/worker.js', 'text/javascript'
+
+  // Chaque étape est journalisée séparément : si ça bloque, on saura LAQUELLE.
+  log('⬇️ [1/4] Préparation du worker...');
+  const classWorkerURL = await withTimeout(
+    makeClassWorkerURL(), 60000,
+    'Échec de préparation du worker (réseau/CDN). Réessayez avec une meilleure connexion.'
   );
-  await ffmpeg.load({
-    classWorkerURL: workerURL,
-    coreURL: await toBlobURL(`${base}/ffmpeg-core.js`,   'text/javascript'),
-    wasmURL: await toBlobURL(`${base}/ffmpeg-core.wasm`, 'application/wasm'),
-  });
+
+  log('⬇️ [2/4] Téléchargement du core...');
+  const coreURL = await withTimeout(
+    toBlobURL(`${base}/ffmpeg-core.js`, 'text/javascript'), 60000,
+    'Échec du téléchargement du core (réseau/CDN).'
+  );
+
+  log('⬇️ [3/4] Téléchargement du moteur wasm (~30 Mo, patientez)...');
+  const wasmURL = await withTimeout(
+    toBlobURL(`${base}/ffmpeg-core.wasm`, 'application/wasm'), 180000,
+    'Le téléchargement du moteur (~30 Mo) a expiré. Connexion trop lente ou instable.'
+  );
+
+  log('⚙️ [4/4] Initialisation du moteur...');
+  await withTimeout(
+    ffmpeg.load({ classWorkerURL, coreURL, wasmURL }), 120000,
+    "L'initialisation a expiré (worker figé sur ce navigateur). Voir README → « Fiabilité sur mobile »."
+  );
   log('✅ ffmpeg prêt.');
   return ffmpeg;
 }
@@ -202,8 +246,8 @@ async function processWithFFmpeg(segments) {
     '-i', inName,
     '-filter_complex', filter,
     '-map', '[outv]', '-map', '[outa]',
-    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20',
-    '-c:a', 'aac', '-b:a', '160k',
+    '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23',
+    '-c:a', 'aac', '-b:a', '128k',
     '-movflags', '+faststart',
     'output.mp4'
   ]);
@@ -243,6 +287,9 @@ processBtn.addEventListener('click', async () => {
 
     if (segments.length > CONFIG.maxSegments) {
       setStatus(`⚠️ ${segments.length} segments : augmentez « silence minimum » pour alléger le traitement.`, 'warn');
+    }
+    if (duration > 120 || segments.length > 60) {
+      log(`⚠️ Vidéo de ${Math.round(duration)} s / ${segments.length} segments : l'encodage sur mobile peut prendre plusieurs minutes. Astuce : testez d'abord avec un clip court (10–20 s) pour valider.`);
     }
 
     progressBar.style.width = '0%';

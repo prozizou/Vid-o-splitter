@@ -54,6 +54,52 @@ Sur le tableau de bord Vercel, vous pouvez aussi déposer directement le dossier
 - **Marge conservée** : petit coussin de temps avant/après chaque phrase,
   pour ne pas rogner le début/fin des mots.
 
+## ⚠️ Fiabilité & vitesse sur mobile (à lire si ça « bloque »)
+
+Le traitement se fait entièrement dans le navigateur du téléphone, avec un
+ffmpeg **mono-thread** (le seul qui fonctionne sans configuration serveur
+spéciale). Conséquences :
+
+- **Le chargement peut se figer** si le worker ffmpeg ne s'initialise pas
+  (limitation connue du chargement via CDN sur certains navigateurs mobiles).
+  Le code journalise désormais chaque étape ([1/4]…[4/4]) et abandonne avec un
+  message clair au lieu de tourner indéfiniment. Regardez la dernière ligne du
+  journal pour savoir OÙ ça coince.
+- **L'encodage est lent** : réencoder une vidéo de plusieurs minutes découpée
+  en dizaines/centaines de segments peut prendre de longues minutes, voire
+  saturer la mémoire du navigateur (limite ~2 Go côté WASM).
+
+### Bons réflexes
+1. **Testez d'abord un clip court** (10–20 s) pour valider toute la chaîne
+   avant de lancer une vidéo de 5 min.
+2. Augmentez « Silence minimum » (ex. 0,5–0,8 s) pour réduire le nombre de
+   segments : moins de segments = encodage beaucoup plus léger.
+3. Gardez le téléphone branché : l'encodage est intensif (la batterie chute).
+
+### Pour une vraie vitesse (version multi-thread)
+La version multi-thread de ffmpeg utilise tous les cœurs du téléphone, mais
+elle exige que le site soit « cross-origin isolated ». Sur Vercel il faut :
+
+1. Ajouter ces en-têtes dans `vercel.json` :
+   ```json
+   {
+     "headers": [{
+       "source": "/(.*)",
+       "headers": [
+         { "key": "Cross-Origin-Opener-Policy",   "value": "same-origin" },
+         { "key": "Cross-Origin-Embedder-Policy",  "value": "require-corp" }
+       ]
+     }]
+   }
+   ```
+2. **Auto-héberger** les fichiers ffmpeg (le CDN est bloqué par ces en-têtes) :
+   déposez `ffmpeg-core.js`, `ffmpeg-core.wasm`, `ffmpeg-core.worker.js` et le
+   `worker.js` de `@ffmpeg/ffmpeg` dans un dossier `public/ffmpeg/`, puis
+   chargez-les via des chemins locaux (`/ffmpeg/...`) au lieu des URL CDN.
+
+C'est plus rapide mais plus lourd à mettre en place. Dites-le-moi si vous
+voulez que je prépare cette variante clé en main.
+
 ## Limites connues
 
 - Core mono-thread → plus lent que le multi-thread. Préférez des clips courts.
