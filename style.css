@@ -1,0 +1,105 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: system-ui, sans-serif;
+  background: #0f172a;
+  color: #e2e8f0;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  min-height: 100vh;
+  padding: 2rem 0;
+}
+
+.container {
+  background: #1e293b;
+  border-radius: 1.5rem;
+  padding: 2.5rem;
+  max-width: 640px;
+  width: 92%;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+  text-align: center;
+}
+
+h1 { font-size: 2rem; margin-bottom: 0.5rem; }
+.subtitle { color: #94a3b8; margin-bottom: 2rem; }
+
+.drop-zone {
+  border: 3px dashed #475569;
+  border-radius: 1rem;
+  padding: 2rem 1rem;
+  transition: 0.3s;
+  margin-bottom: 1.5rem;
+  cursor: pointer;
+}
+.drop-zone.dragover { border-color: #38bdf8; background: rgba(56, 189, 248, 0.05); }
+.drop-zone input { display: none; }
+
+.controls {
+  display: grid;
+  gap: 1rem;
+  text-align: left;
+  background: #0f172a;
+  border-radius: 0.75rem;
+  padding: 1rem 1.25rem;
+  margin-bottom: 1.5rem;
+}
+.control label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.85rem;
+  color: #cbd5e1;
+  margin-bottom: 0.35rem;
+}
+.control label b { color: #38bdf8; font-variant-numeric: tabular-nums; }
+.control input[type=range] { width: 100%; accent-color: #38bdf8; }
+
+.btn {
+  display: inline-block;
+  background: #3b82f6;
+  color: white;
+  border: none;
+  padding: 0.8rem 2rem;
+  border-radius: 999px;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  margin: 0.5rem;
+  transition: 0.2s;
+  text-decoration: none;
+}
+.btn:disabled { background: #334155; cursor: not-allowed; }
+.btn:hover:not(:disabled) { background: #2563eb; }
+
+.progress {
+  height: 8px;
+  background: #334155;
+  border-radius: 4px;
+  overflow: hidden;
+  margin: 1rem 0;
+}
+.progress-bar {
+  height: 100%;
+  width: 0%;
+  background: #38bdf8;
+  transition: width 0.2s;
+}
+
+.log {
+  background: #0f172a;
+  border-radius: 0.5rem;
+  padding: 0.8rem;
+  text-align: left;
+  font-family: monospace;
+  font-size: 0.8rem;
+  max-height: 160px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  margin: 1rem 0;
+  color: #94a3b8;
+}
+
+#status { min-height: 1.4rem; margin-bottom: 0.5rem; }
+.warn { color: #fbbf24; }
+.err { color: #f87171; }
+.hidden { display: none; }
