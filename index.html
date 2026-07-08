@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>🪓 Video Silence Cutter</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+      min-height: 100vh;
+      padding: 2rem 0;
+    }
+    .container {
+      background: #1e293b;
+      border-radius: 1.5rem;
+      padding: 2.5rem;
+      max-width: 640px;
+      width: 92%;
+      box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5);
+      text-align: center;
+    }
+    h1 { font-size: 2rem; margin-bottom: 0.5rem; }
+    .subtitle { color: #94a3b8; margin-bottom: 2rem; }
+    .drop-zone {
+      border: 3px dashed #475569;
+      border-radius: 1rem;
+      padding: 2rem 1rem;
+      transition: 0.3s;
+      margin-bottom: 1.5rem;
+      cursor: pointer;
+    }
+    .drop-zone.dragover { border-color: #38bdf8; background: rgba(56,189,248,0.05); }
+    .drop-zone input { display: none; }
+    .controls {
+      display: grid;
+      gap: 1rem;
+      text-align: left;
+      background: #0f172a;
+      border-radius: 0.75rem;
+      padding: 1rem 1.25rem;
+      margin-bottom: 1.5rem;
+    }
+    .control label { display: flex; justify-content: space-between; font-size: 0.85rem; color: #cbd5e1; margin-bottom: 0.35rem; }
+    .control label b { color: #38bdf8; font-variant-numeric: tabular-nums; }
+    .control input[type=range] { width: 100%; accent-color: #38bdf8; }
+    .btn {
+      display: inline-block;
+      background: #3b82f6;
+      color: white;
+      border: none;
+      padding: 0.8rem 2rem;
+      border-radius: 999px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      margin: 0.5rem;
+      transition: 0.2s;
+      text-decoration: none;
+    }
+    .btn:disabled { background: #334155; cursor: not-allowed; }
+    .btn:hover:not(:disabled) { background: #2563eb; }
+    .progress { height: 8px; background: #334155; border-radius: 4px; overflow: hidden; margin: 1rem 0; }
+    .progress-bar { height: 100%; width: 0%; background: #38bdf8; transition: width 0.2s; }
+    .log {
+      background: #0f172a;
+      border-radius: 0.5rem;
+      padding: 0.8rem;
+      text-align: left;
+      font-family: monospace;
+      font-size: 0.8rem;
+      max-height: 160px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      margin: 1rem 0;
+      color: #94a3b8;
+    }
+    #status { min-height: 1.4rem; margin-bottom: 0.5rem; }
+    .warn { color: #fbbf24; }
+    .err { color: #f87171; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+<div class="container">
+  <h1>🪓 Video Silence Cutter</h1>
+  <p class="subtitle">Supprime automatiquement les silences d'une vidéo — 100&nbsp;% dans le navigateur</p>
+
+  <div class="drop-zone" id="dropZone">
+    📂 Glissez-déposez une vidéo ici<br>ou cliquez pour sélectionner
+    <input type="file" id="fileInput" accept="video/*">
+  </div>
+
+  <div class="controls">
+    <div class="control">
+      <label>Sensibilité (garde les passages plus doux) <b id="sensVal">1.0×</b></label>
+      <input type="range" id="sens" min="0.5" max="2.5" step="0.1" value="1.0">
+    </div>
+    <div class="control">
+      <label>Silence minimum à couper <b id="silVal">0.40 s</b></label>
+      <input type="range" id="sil" min="0.15" max="2" step="0.05" value="0.4">
+    </div>
+    <div class="control">
+      <label>Marge conservée autour de la voix <b id="padVal">0.08 s</b></label>
+      <input type="range" id="pad" min="0" max="0.3" step="0.01" value="0.08">
+    </div>
+  </div>
+
+  <div id="status"></div>
+  <div class="progress hidden" id="progressContainer">
+    <div class="progress-bar" id="progressBar"></div>
+  </div>
+  <div class="log hidden" id="logOutput"></div>
+
+  <button class="btn" id="processBtn" disabled>🔪 Détecter et couper les silences</button>
+  <a class="btn hidden" id="downloadLink" download="video_sans_silence.mp4">⬇️ Télécharger le résultat</a>
+</div>
+
+<script type="module">
+  import { FFmpeg } from 'https://esm.sh/@ffmpeg/ffmpeg@0.12.10';
+  import { fetchFile, toBlobURL } from 'https://esm.sh/@ffmpeg/util@0.12.1';
+
+  // ==================== CONFIGURATION ====================
+  const CONFIG = {
+    windowSec:     0.03,   // taille de fenêtre d'analyse audio
+    minSilenceDur: 0.40,   // durée mini d'un silence pour être coupé (pilotée par slider)
+    minSegmentDur: 0.30,   // on jette les segments conservés trop courts
+    padding:       0.08,   // marge conservée avant/après la voix (slider)
+    sensitivity:   1.0,    // multiplicateur du seuil adaptatif (slider)
+    audioFadeSec:  0.008,  // micro-fondu anti-clic à chaque raccord
+    absFloor:      0.004,  // plancher d'amplitude absolu
+    maxSegments:   500     // au-delà, on prévient (filter_complex trop lourd)
+  };
+
+  // ==================== DOM ====================
+  const $ = id => document.getElementById(id);
+  const dropZone = $('dropZone'), fileInput = $('fileInput'), processBtn = $('processBtn');
+  const statusDiv = $('status'), progressContainer = $('progressContainer'), progressBar = $('progressBar');
+  const logOutput = $('logOutput'), downloadLink = $('downloadLink');
+
+  let videoFile = null;
+  let currentURL = null;      // pour révoquer l'ancien blob
+  let ffmpeg = null;          // instance réutilisée
+
+  // Sliders
+  const bind = (id, valId, fmt, key) => {
+    const el = $(id);
+    const upd = () => { CONFIG[key] = parseFloat(el.value); $(valId).textContent = fmt(el.value); };
+    el.addEventListener('input', upd); upd();
+  };
+  bind('sens', 'sensVal', v => `${(+v).toFixed(1)}×`, 'sensitivity');
+  bind('sil',  'silVal',  v => `${(+v).toFixed(2)} s`, 'minSilenceDur');
+  bind('pad',  'padVal',  v => `${(+v).toFixed(2)} s`, 'padding');
+
+  // ==================== FICHIER ====================
+  dropZone.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', handleFile);
+  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+  dropZone.addEventListener('drop', e => {
+    e.preventDefault(); dropZone.classList.remove('dragover');
+    if (e.dataTransfer.files.length) { fileInput.files = e.dataTransfer.files; handleFile(); }
+  });
+
+  function handleFile() {
+    const file = fileInput.files[0];
+    if (!file) return;
+    videoFile = file;
+    setStatus(`✅ Vidéo chargée : ${file.name} (${(file.size/1048576).toFixed(1)} Mo)`);
+    processBtn.disabled = false;
+    downloadLink.classList.add('hidden');
+  }
+
+  function setStatus(msg, cls='') { statusDiv.className = cls; statusDiv.textContent = msg; }
+  function log(msg) {
+    logOutput.classList.remove('hidden');
+    logOutput.textContent += msg + '\n';
+    logOutput.scrollTop = logOutput.scrollHeight;
+  }
+
+  // ==================== DÉTECTION DES SILENCES ====================
+  // Renvoie une liste de segments [start, end] à CONSERVER.
+  async function detectSegments(onProgress) {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    const audioCtx = new AudioCtx();
+    let audioBuffer;
+    try {
+      const arr = await videoFile.arrayBuffer();
+      audioBuffer = await audioCtx.decodeAudioData(arr);
+    } catch (e) {
+      audioCtx.close();
+      throw new Error("Impossible de décoder l'audio. La vidéo possède-t-elle bien une piste audio ? (" + e.message + ")");
+    }
+    const sr = audioBuffer.sampleRate;
+    const dur = audioBuffer.duration;
+    const len = audioBuffer.length;
+    const ch = audioBuffer.numberOfChannels;
+
+    if (!len || !dur) { audioCtx.close(); throw new Error("Piste audio vide."); }
+
+    // Mixdown mono (moyenne des canaux) → plus robuste que « canal 0 » uniquement
+    const data = new Float32Array(len);
+    for (let c = 0; c < ch; c++) {
+      const cd = audioBuffer.getChannelData(c);
+      for (let i = 0; i < len; i++) data[i] += cd[i] / ch;
+    }
+    audioCtx.close();
+
+    // Énergie RMS par fenêtre — boucle découpée pour ne pas geler l'UI
+    const win = Math.max(1, Math.floor(sr * CONFIG.windowSec));
+    const winSec = win / sr;
+    const nWin = Math.ceil(len / win);
+    const loud = new Float32Array(nWin);
+    let wi = 0;
+    for (let i = 0; i < len; i += win) {
+      const end = Math.min(i + win, len);
+      let sum = 0, n = 0;
+      for (let j = i; j < end; j++) { const s = data[j]; sum += s * s; n++; }
+      loud[wi++] = Math.sqrt(sum / n);
+      if ((wi & 2047) === 0) { onProgress(i / len); await new Promise(r => setTimeout(r)); }
+    }
+
+    // Seuil ADAPTATIF : à partir du bruit de fond réel du fichier
+    const sorted = Float32Array.from(loud).sort();
+    const pct = q => sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))];
+    const noiseFloor = pct(0.10);   // ~ bruit de fond
+    const loudRef    = pct(0.90);   // ~ niveau de la voix
+    let thr = Math.max(noiseFloor * 2.5, loudRef * 0.06);
+    thr = Math.max(thr / CONFIG.sensitivity, CONFIG.absFloor);
+
+    // Machine à états : on bride les silences courts (< minSilenceDur)
+    const minSilWin = Math.max(1, Math.round(CONFIG.minSilenceDur / winSec));
+    const raw = [];
+    let start = null, lastLoud = -1;
+    for (let k = 0; k < nWin; k++) {
+      if (loud[k] > thr) {
+        if (start === null) start = k;
+        lastLoud = k;
+      } else if (start !== null && (k - lastLoud) >= minSilWin) {
+        raw.push([start * winSec, (lastLoud + 1) * winSec]);
+        start = null;
+      }
+    }
+    if (start !== null) raw.push([start * winSec, Math.min(dur, (lastLoud + 1) * winSec)]);
+
+    // Marge + fusion des segments qui se chevauchent après marge
+    const padded = raw.map(([s, e]) => [Math.max(0, s - CONFIG.padding), Math.min(dur, e + CONFIG.padding)]);
+    const merged = [];
+    for (const [s, e] of padded) {
+      const last = merged[merged.length - 1];
+      if (last && s <= last[1]) last[1] = Math.max(last[1], e);
+      else merged.push([s, e]);
+    }
+    const final = merged.filter(([s, e]) => e - s >= CONFIG.minSegmentDur);
+    if (final.length === 0) final.push([0, dur]); // sécurité : on garde tout
+
+    const kept = final.reduce((a, [s, e]) => a + (e - s), 0);
+    return { segments: final, duration: dur, kept, threshold: thr };
+  }
+
+  // ==================== FFMPEG (API 0.12.x) ====================
+  async function getFFmpeg() {
+    if (ffmpeg) return ffmpeg;
+    log('🔄 Chargement de ffmpeg.wasm (~30 Mo au premier lancement)...');
+    ffmpeg = new FFmpeg();
+    ffmpeg.on('log', ({ message }) => { if (!message.includes('frame=')) log(message); });
+    ffmpeg.on('progress', ({ progress }) => {
+      const p = Math.max(0, Math.min(1, progress || 0));
+      progressBar.style.width = `${Math.round(p * 100)}%`;
+    });
+    // Core mono-thread : ne nécessite PAS SharedArrayBuffer ni en-têtes COOP/COEP
+    const base = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
+    await ffmpeg.load({
+      coreURL: await toBlobURL(`${base}/ffmpeg-core.js`,   'text/javascript'),
+      wasmURL: await toBlobURL(`${base}/ffmpeg-core.wasm`, 'application/wasm'),
+    });
+    log('✅ ffmpeg prêt.');
+    return ffmpeg;
+  }
+
+  function buildFilter(segments) {
+    const parts = [];
+    segments.forEach(([s, e], i) => {
+      const d = e - s;
+      const f = Math.min(CONFIG.audioFadeSec, d / 2);
+      parts.push(`[0:v]trim=start=${s.toFixed(4)}:end=${e.toFixed(4)},setpts=PTS-STARTPTS[v${i}]`);
+      parts.push(
+        `[0:a]atrim=start=${s.toFixed(4)}:end=${e.toFixed(4)},asetpts=PTS-STARTPTS,` +
+        `afade=t=in:st=0:d=${f.toFixed(4)},afade=t=out:st=${(d - f).toFixed(4)}:d=${f.toFixed(4)}[a${i}]`
+      );
+    });
+    const inputs = segments.map((_, i) => `[v${i}][a${i}]`).join('');
+    return `${parts.join(';')};${inputs}concat=n=${segments.length}:v=1:a=1[outv][outa]`;
+  }
+
+  async function processWithFFmpeg(segments) {
+    const ff = await getFFmpeg();
+    const ext = (videoFile.name.split('.').pop() || 'mp4').toLowerCase().replace(/[^a-z0-9]/g, '') || 'mp4';
+    const inName = `input.${ext}`;
+
+    await ff.writeFile(inName, await fetchFile(videoFile));
+    const filter = buildFilter(segments);
+
+    log(`✂️ Assemblage de ${segments.length} segment(s)...`);
+    await ff.exec([
+      '-i', inName,
+      '-filter_complex', filter,
+      '-map', '[outv]', '-map', '[outa]',
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20',
+      '-c:a', 'aac', '-b:a', '160k',
+      '-movflags', '+faststart',
+      'output.mp4'
+    ]);
+
+    const data = await ff.readFile('output.mp4');
+    // Nettoyage du FS virtuel pour libérer la mémoire
+    try { await ff.deleteFile(inName); await ff.deleteFile('output.mp4'); } catch {}
+
+    if (currentURL) URL.revokeObjectURL(currentURL); // évite les fuites entre 2 traitements
+    currentURL = URL.createObjectURL(new Blob([data.buffer], { type: 'video/mp4' }));
+    downloadLink.href = currentURL;
+    downloadLink.classList.remove('hidden');
+  }
+
+  // ==================== FLUX PRINCIPAL ====================
+  processBtn.addEventListener('click', async () => {
+    if (!videoFile) return;
+    processBtn.disabled = true;
+    downloadLink.classList.add('hidden');
+    logOutput.classList.add('hidden'); logOutput.textContent = '';
+    progressContainer.classList.remove('hidden'); progressBar.style.width = '0%';
+    setStatus('🔍 Analyse audio en cours...');
+
+    try {
+      const { segments, duration, kept } = await detectSegments(r => {
+        progressBar.style.width = `${Math.round(r * 100)}%`;
+      });
+
+      const saved = duration - kept;
+      setStatus(`🎤 ${segments.length} segment(s) — ${saved.toFixed(1)} s de silence retirés sur ${duration.toFixed(1)} s.`);
+
+      if (segments.length > CONFIG.maxSegments) {
+        setStatus(`⚠️ ${segments.length} segments : augmentez « silence minimum » pour alléger le traitement.`, 'warn');
+      }
+
+      progressBar.style.width = '0%';
+      await processWithFFmpeg(segments);
+      setStatus('🎉 Terminé ! Cliquez pour télécharger.');
+    } catch (err) {
+      console.error(err);
+      let msg = '❌ Erreur : ' + err.message;
+      if (/import|module|fetch|network|Failed/i.test(err.message)) {
+        msg += ' — Ce fichier doit être ouvert via un serveur (http://localhost), pas en file://, et nécessite un accès réseau au premier chargement.';
+      }
+      setStatus(msg, 'err');
+    } finally {
+      processBtn.disabled = false;
+    }
+  });
+
+  window.addEventListener('beforeunload', () => { if (currentURL) URL.revokeObjectURL(currentURL); });
+</script>
+</body>
+</html>

@@ -1,0 +1,61 @@
+🪓 VIDEO SILENCE CUTTER — version robuste
+==========================================
+
+Outil 100 % navigateur qui détecte et supprime les silences d'une vidéo.
+Aucune donnée n'est envoyée sur un serveur : tout se passe en local.
+
+------------------------------------------------------------
+⚠️ IMPORTANT — COMMENT LANCER LE FICHIER
+------------------------------------------------------------
+Il ne suffit PAS de double-cliquer sur index.html (ouverture en file://).
+Les modules JavaScript + ffmpeg.wasm exigent un vrai serveur HTTP.
+
+Le plus simple :
+
+  1) Ouvrir un terminal dans ce dossier
+  2) Lancer un petit serveur :
+       - Python :  python -m http.server 8000
+       - Node   :  npx serve
+  3) Ouvrir http://localhost:8000 dans le navigateur
+
+Un accès Internet est requis au PREMIER lancement pour télécharger
+ffmpeg.wasm (~30 Mo) depuis le CDN. Ensuite le navigateur le met en cache.
+
+Navigateurs : Chrome / Edge / Android récents recommandés.
+
+------------------------------------------------------------
+RÉGLAGES (curseurs)
+------------------------------------------------------------
+• Sensibilité         : plus haut = garde les passages parlés plus doux.
+• Silence minimum     : un blanc plus court que cette valeur n'est PAS coupé.
+• Marge conservée     : petit coussin de temps gardé avant/après chaque phrase
+                        (évite de couper le début/fin des mots).
+
+------------------------------------------------------------
+CE QUI A ÉTÉ CORRIGÉ / AMÉLIORÉ vs la version d'origine
+------------------------------------------------------------
+1. BUG BLOQUANT : l'API ffmpeg était celle de la 0.11 (createFFmpeg / FS / run)
+   alors que le CDN chargeait la 0.12. Réécrit avec l'API 0.12
+   (new FFmpeg / load / writeFile / exec / readFile). Core mono-thread,
+   donc pas besoin d'en-têtes COOP/COEP ni de SharedArrayBuffer.
+2. Seuil de silence ADAPTATIF (calculé sur le bruit de fond réel du fichier)
+   au lieu d'une valeur fixe 0.02.
+3. Calcul de durée de silence corrigé (l'ancien était erroné) + mesure RMS.
+4. Mixdown mono de tous les canaux (au lieu du seul canal 0).
+5. Marge autour de la voix + fusion des segments proches → moins de coupes
+   brutales et filter_complex plus léger.
+6. Micro-fondus audio (~8 ms) aux raccords → supprime les clics.
+7. Détection audio découpée en morceaux → l'interface ne gèle plus.
+8. Gestion du cas « vidéo sans piste audio » avec message clair.
+9. URL.revokeObjectURL() → plus de fuite mémoire entre deux traitements.
+10. Nettoyage du système de fichiers virtuel ffmpeg après chaque export.
+11. Messages d'erreur explicites (file:// vs http, réseau, etc.).
+
+------------------------------------------------------------
+LIMITES CONNUES
+------------------------------------------------------------
+• Le core mono-thread est plus lent que la version multi-thread.
+  Pour de longues vidéos, privilégiez des clips courts.
+• Réencodage H.264/AAC systématique (nécessaire car les coupes ne tombent
+  pas sur des images-clés). C'est l'étape la plus lente.
+• Très nombreux segments = traitement lourd : augmentez « silence minimum ».
