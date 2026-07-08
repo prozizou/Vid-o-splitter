@@ -151,7 +151,14 @@ async function getFFmpeg() {
   });
   // Core mono-thread : ne nécessite PAS SharedArrayBuffer ni en-têtes COOP/COEP
   const base = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
+  // IMPORTANT : chargé depuis un CDN, ffmpeg tente de créer son Worker sur une
+  // AUTRE origine (esm.sh) → interdit par le navigateur. On télécharge donc le
+  // worker et on le passe en blob (même origine) via classWorkerURL.
+  const workerURL = await toBlobURL(
+    'https://esm.sh/@ffmpeg/ffmpeg@0.12.10/es2022/worker.js', 'text/javascript'
+  );
   await ffmpeg.load({
+    classWorkerURL: workerURL,
     coreURL: await toBlobURL(`${base}/ffmpeg-core.js`,   'text/javascript'),
     wasmURL: await toBlobURL(`${base}/ffmpeg-core.wasm`, 'application/wasm'),
   });
@@ -230,8 +237,8 @@ processBtn.addEventListener('click', async () => {
   } catch (err) {
     console.error(err);
     let msg = '❌ Erreur : ' + err.message;
-    if (/import|module|fetch|network|Failed/i.test(err.message)) {
-      msg += ' — Vérifiez votre connexion (ffmpeg.wasm se télécharge au premier lancement).';
+    if (/Worker|import|module|fetch|network|Failed/i.test(err.message)) {
+      msg += ' — Problème de chargement de ffmpeg depuis le CDN. Vérifiez votre connexion (ffmpeg.wasm se télécharge au premier lancement) et réessayez.';
     }
     setStatus(msg, 'err');
   } finally {
