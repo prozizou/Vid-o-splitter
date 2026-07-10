@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Echo Remover — Studio Vidéo</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <meta name="theme-color" content="#0f172a">
+  <link rel="icon" href="/icons/favicon.ico" sizes="any">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="container">
+  <a class="back" href="/">← Menu</a>
+  <h1>🔇 Echo Remover</h1>
+  <p class="subtitle">Atténue l'écho et la réverbération d'une pièce sur une voix — audio ou vidéo.</p>
+
+  <div class="drop-zone" id="dropZone">
+    📂 Glissez-déposez un fichier audio ou vidéo<br>ou cliquez pour sélectionner
+    <input type="file" id="fileInput" accept="audio/*,video/*">
+  </div>
+
+  <div class="controls">
+    <div class="control">
+      <label>Intensité de la réduction <b id="strengthVal">Moyenne</b></label>
+      <input type="range" id="strength" min="0.2" max="1.6" step="0.1" value="0.8">
+      <small class="hint">Trop fort peut rendre la voix « sous l'eau ». Commencez moyen, écoutez, ajustez.</small>
+    </div>
+    <div class="control">
+      <label>Taille de la pièce (durée de l'écho) <b id="tailVal">Moyenne</b></label>
+      <input type="range" id="tail" min="0.15" max="0.8" step="0.05" value="0.35">
+    </div>
+    <label class="check"><input type="checkbox" id="hp" checked> Couper les basses parasites (&lt; 85 Hz)</label>
+    <label class="check"><input type="checkbox" id="gate" checked> Porte de bruit douce entre les phrases</label>
+  </div>
+
+  <div id="status"></div>
+  <div class="progress hidden" id="progressContainer"><div class="progress-bar" id="progressBar"></div></div>
+
+  <div class="actions">
+    <button class="btn" id="processBtn" disabled>🔇 Réduire l'écho</button>
+  </div>
+
+  <section class="compare hidden" id="compareBox">
+    <h2>Écouter et comparer</h2>
+    <div class="compare-row"><span>Avant</span><audio id="beforeAudio" controls preload="metadata"></audio></div>
+    <div class="compare-row"><span>Après</span><audio id="afterAudio" controls preload="metadata"></audio></div>
+  </section>
+
+  <div class="actions hidden" id="exportBox">
+    <a class="btn" id="dlWav" download="voix_sans_echo.wav">⬇️ Enregistrer en WAV</a>
+    <button class="btn btn-ghost" id="dlM4a">⬇️ Enregistrer en M4A (plus léger)</button>
+    <button class="btn btn-ghost hidden" id="dlVideo">🎬 Réinjecter dans la vidéo d'origine</button>
+  </div>
+  <video id="videoOut" class="preview hidden" controls playsinline preload="metadata"></video>
+  <a class="btn hidden" id="dlVideoLink" download="video_sans_echo.mp4">⬇️ Enregistrer la vidéo</a>
+
+  <div class="log hidden" id="logOutput"></div>
+</div>
+<script type="module" src="echo.js"></script>
+<script>
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});
+</script>
+</body>
+</html>

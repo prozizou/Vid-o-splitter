@@ -3,11 +3,11 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <title>Video Silence Cutter</title>
+  <title>Studio Vidéo — 100 % local</title>
 
   <link rel="manifest" href="/manifest.webmanifest">
   <meta name="theme-color" content="#0f172a">
-  <meta name="description" content="Supprime automatiquement les silences d'une vidéo, directement sur votre appareil.">
+  <meta name="description" content="Boîte à outils vidéo et audio, 100 % dans le navigateur. Aucune donnée envoyée en ligne.">
 
   <link rel="icon" href="/icons/favicon.ico" sizes="any">
   <link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png">
@@ -16,112 +16,56 @@
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="apple-mobile-web-app-title" content="SilenceCut">
+  <meta name="apple-mobile-web-app-title" content="Studio">
 
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <div class="container">
-  <h1>🪓 Video Silence Cutter</h1>
-  <p class="subtitle">Supprime automatiquement les silences d'une vidéo — 100&nbsp;% dans le navigateur</p>
+  <h1>🎬 Studio Vidéo</h1>
+  <p class="subtitle">Quatre outils, zéro envoi en ligne : tout se passe sur votre appareil.</p>
 
-  <div class="banner hidden" id="resumeBanner"></div>
+  <nav class="menu">
+    <a class="menu-card" href="/splitter.html">
+      <span class="menu-icon">🪓</span>
+      <span class="menu-body">
+        <b>Splitter</b>
+        <small>Supprime les silences d'une vidéo. Moteur turbo, traitement par parties, reprise après coupure.</small>
+      </span>
+      <span class="menu-go">›</span>
+    </a>
 
-  <div class="drop-zone" id="dropZone">
-    📂 Glissez-déposez une vidéo ici<br>ou cliquez pour sélectionner
-    <input type="file" id="fileInput" accept="video/*">
-  </div>
+    <a class="menu-card" href="/echo.html">
+      <span class="menu-icon">🔇</span>
+      <span class="menu-body">
+        <b>Echo Remover</b>
+        <small>Atténue l'écho et la réverbération d'une pièce sur une voix enregistrée.</small>
+      </span>
+      <span class="menu-go">›</span>
+    </a>
 
-  <div class="controls">
-    <div class="control">
-      <label>Sensibilité (garde les passages plus doux) <b id="sensVal">1.0×</b></label>
-      <input type="range" id="sens" min="0.5" max="2.5" step="0.1" value="1.0">
-    </div>
-    <div class="control">
-      <label>Silence minimum à couper <b id="silVal">0.40 s</b></label>
-      <input type="range" id="sil" min="0.15" max="2" step="0.05" value="0.4">
-    </div>
-    <div class="control">
-      <label>Marge conservée autour de la voix <b id="padVal">0.08 s</b></label>
-      <input type="range" id="pad" min="0" max="0.3" step="0.01" value="0.08">
-    </div>
-    <div class="control">
-      <label for="engine">Moteur</label>
-      <select id="engine">
-        <option value="turbo" selected>Turbo — puce du téléphone</option>
-        <option value="compat">Compatible — ffmpeg (lent)</option>
-      </select>
-      <small class="hint" id="engineNote"></small>
-    </div>
-    <div class="control">
-      <label>Qualité vidéo <b id="crfVal">Équilibrée</b></label>
-      <input type="range" id="crf" min="18" max="30" step="1" value="23">
-    </div>
-    <div class="control">
-      <label for="chunk">Durée des parties</label>
-      <select id="chunk">
-        <option value="auto" selected>Automatique</option>
-        <option value="120">2 minutes (mémoire limitée)</option>
-        <option value="180">3 minutes</option>
-        <option value="240">4 minutes</option>
-        <option value="480">8 minutes</option>
-        <option value="off">Une seule partie</option>
-      </select>
-      <small class="hint">La vidéo est coupée dans les silences. Chaque partie est traitée séparément, puis vous les réunissez.</small>
-    </div>
-  </div>
+    <a class="menu-card" href="/studio.html">
+      <span class="menu-icon">🎚️</span>
+      <span class="menu-body">
+        <b>Audio Studio</b>
+        <small>Nettoyage complet : porte de bruit, égaliseur, compresseur, normalisation. Avec pré-écoute.</small>
+      </span>
+      <span class="menu-go">›</span>
+    </a>
 
-  <details class="panel" id="eqPanel">
-    <summary>🎚️ Égaliseur voix <span class="tag" id="eqTag">Neutre</span></summary>
+    <a class="menu-card" href="/lyrics.html">
+      <span class="menu-icon">🎤</span>
+      <span class="menu-body">
+        <b>Lyrics</b>
+        <small>Synchronisez des paroles sur une musique en tapotant, puis exportez en .lrc ou .srt.</small>
+      </span>
+      <span class="menu-go">›</span>
+    </a>
+  </nav>
 
-    <div class="control">
-      <label for="eqPreset">Préréglage</label>
-      <select id="eqPreset">
-        <option value="flat" selected>Neutre (aucun traitement)</option>
-        <option value="clear">Voix claire</option>
-        <option value="podcast">Podcast chaud</option>
-        <option value="denoise">Anti-bruit / anti-souffle</option>
-        <option value="custom">Personnalisé</option>
-      </select>
-    </div>
-
-    <div class="eq-bands" id="eqBands"></div>
-
-    <label class="check"><input type="checkbox" id="eqHighpass"> Couper les basses parasites (&lt; 85 Hz)</label>
-    <label class="check"><input type="checkbox" id="eqNormalize"> Égaliser le volume entre les passages</label>
-    <label class="check"><input type="checkbox" id="eqLinear"> Phase linéaire (plus fidèle, plus lent)</label>
-    <button class="btn btn-ghost" id="eqReset" type="button">Remettre à plat</button>
-  </details>
-
-  <div id="status"></div>
-
-  <div class="progress hidden" id="progressContainer">
-    <div class="progress-bar" id="progressBar"></div>
-  </div>
-  <div class="progress-meta hidden" id="progressMeta">
-    <span id="progressPct">0 %</span>
-    <span id="progressPhase"></span>
-    <span id="progressEta"></span>
-  </div>
-
-  <div class="actions">
-    <button class="btn" id="processBtn" disabled>🔪 Détecter et couper les silences</button>
-    <button class="btn btn-ghost hidden" id="pauseBtn">⏸️ Mettre en pause</button>
-  </div>
-
-  <section class="parts hidden" id="partsSection">
-    <h2>Parties <span class="tag" id="partsTag">0/0</span></h2>
-    <div id="partsList"></div>
-    <button class="btn hidden" id="joinBtn" disabled>🧩 Réunir toutes les parties</button>
-  </section>
-
-  <video id="preview" class="preview hidden" controls playsinline preload="metadata"></video>
-  <a class="btn hidden" id="downloadLink" download="video_sans_silence.mp4">⬇️ Enregistrer la vidéo finale</a>
-
-  <div class="log hidden" id="logOutput"></div>
+  <p class="foot">Fonctionne hors-ligne une fois installée. Vos fichiers ne quittent jamais l'appareil.</p>
 </div>
 
-<script type="module" src="app.js"></script>
 <script>
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {

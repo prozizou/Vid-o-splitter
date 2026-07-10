@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Lyrics — Studio Vidéo</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <meta name="theme-color" content="#0f172a">
+  <link rel="icon" href="/icons/favicon.ico" sizes="any">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="container">
+  <a class="back" href="/">← Menu</a>
+  <h1>🎤 Lyrics</h1>
+  <p class="subtitle">Synchronisez des paroles sur une musique : la chanson joue, vous tapez le gros bouton au début de chaque ligne. Export .lrc et .srt.</p>
+
+  <div class="drop-zone" id="dropZone">
+    📂 Glissez-déposez un fichier audio ou vidéo<br>ou cliquez pour sélectionner
+    <input type="file" id="fileInput" accept="audio/*,video/*">
+  </div>
+
+  <div class="control">
+    <label for="lyricsText">Paroles (une ligne par ligne chantée)</label>
+    <textarea id="lyricsText" rows="7" placeholder="Collez les paroles ici…&#10;Une ligne = une ligne affichée.&#10;Les lignes vides séparent les couplets."></textarea>
+    <small class="hint">Vous pouvez aussi importer un fichier .lrc existant pour le corriger.</small>
+  </div>
+
+  <div class="actions">
+    <button class="btn btn-ghost" id="loadLinesBtn" disabled>📝 Préparer la synchronisation</button>
+    <label class="btn btn-ghost" style="text-align:center">📥 Importer un .lrc
+      <input type="file" id="lrcInput" accept=".lrc,.txt" hidden>
+    </label>
+  </div>
+
+  <div id="status"></div>
+
+  <section class="sync hidden" id="syncBox">
+    <audio id="player" controls preload="metadata"></audio>
+
+    <div class="sync-lines" id="syncLines"></div>
+
+    <button class="btn tap-btn" id="tapBtn">👇 LA LIGNE COMMENCE MAINTENANT</button>
+    <div class="actions">
+      <button class="btn btn-ghost btn-small" id="backBtn">↩️ Reculer d'une ligne</button>
+      <button class="btn btn-ghost btn-small" id="rewindBtn">⏪ -5 s</button>
+      <button class="btn btn-ghost btn-small" id="restartBtn">🔁 Tout recommencer</button>
+    </div>
+  </section>
+
+  <div class="actions hidden" id="exportBox">
+    <button class="btn" id="dlLrc">⬇️ Exporter .lrc (lecteurs de musique)</button>
+    <button class="btn btn-ghost" id="dlSrt">⬇️ Exporter .srt (sous-titres vidéo)</button>
+  </div>
+
+  <div class="log hidden" id="logOutput"></div>
+</div>
+<script type="module" src="lyrics.js"></script>
+<script>
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});
+</script>
+</body>
+</html>

@@ -1,59 +1,42 @@
-# 🪓 Video Silence Cutter (v2 — multi-thread)
+# Studio Video — boite a outils 100 % locale (v6)
 
-Outil 100 % navigateur qui détecte et supprime les silences d'une vidéo, puis
-réassemble une vidéo compacte. Aucun serveur de traitement : tout se passe dans
-le navigateur (Web Audio API pour la détection + ffmpeg.wasm pour le montage).
+Quatre outils dans une seule PWA. Aucun fichier ne quitte l'appareil.
 
-## Ce qui change dans la v2
+| Page | Outil | Fichier |
+|---|---|---|
+| `/` | Menu d'accueil | `index.html` |
+| `/splitter.html` | **Splitter** — supprime les silences (moteur turbo WebCodecs) | `app.js` + `turbo.js` |
+| `/echo.html` | **Echo Remover** — attenue l'echo / la reverberation d'une piece | `echo.js` |
+| `/studio.html` | **Audio Studio** — porte de bruit, EQ 7 bandes, compresseur, normalisation LUFS | `studio.js` |
+| `/lyrics.html` | **Lyrics** — synchronisation de paroles au toucher, export .lrc / .srt | `lyrics.js` |
 
-- **Multi-thread** : ffmpeg utilise tous les cœurs du téléphone -> beaucoup plus
-  rapide sur les vidéos longues. Bascule automatique en mono-thread si
-  l'isolation cross-origin n'est pas disponible.
-- **Auto-hébergement de ffmpeg** : les fichiers ffmpeg ne sont plus chargés
-  depuis un CDN au runtime. Ils sont téléchargés **pendant le build Vercel**
-  (côté serveur) et servis depuis votre propre domaine (/vendor/...). Cela :
-  - active le multi-thread (en-têtes COOP/COEP, incompatibles avec les CDN) ;
-  - supprime les pannes de CDN qu'on subissait (404, worker cross-origin...) ;
-  - évite tout upload manuel de 30 Mo depuis le téléphone.
+`media.js` est la boite a outils partagee : decodage audio universel (fichiers
+audio OU video), export WAV, conversion M4A, reinjection de l'audio traite dans
+la video d'origine (`-c:v copy`, l'image n'est jamais reencodee), et une FFT
+autonome pour le traitement spectral.
 
-## Structure
+## Echo Remover
+Soustraction spectrale trame par trame (STFT 1024/256, fenetre de Hann) :
+l'estimation de la reverberation tardive (moyenne exponentielle reglee par la
+« taille de piece ») est soustraite du spectre, avec plancher, lissage temporel
+et frequentiel contre le bruit musical, et porte douce optionnelle entre les
+phrases. Comparaison avant/apres integree.
 
-    index.html   -> page
-    style.css    -> styles
-    app.js       -> logique (module ES, imports depuis /vendor)
-    build.sh     -> telecharge ffmpeg dans dist/vendor pendant le build
-    vercel.json  -> build + outputDirectory + en-tetes COOP/COEP
-    package.json
-    README.md
+## Audio Studio
+Chaine : porte de bruit maison (attaque 3 ms, relache 120 ms, jamais de mute
+brutal) -> coupe-bas -> EQ 7 bandes -> compresseur -> normalisation vers une
+cible LUFS (-16 streaming / -14 reseaux sociaux) avec limiteur de crete a
+-1 dBFS. **Pre-ecoute en direct** des 10 premieres secondes avec la meme chaine,
+pour regler avant de traiter tout le fichier. Prereglages : Voix, Podcast,
+Musique, Reparation.
 
-Au build, dist/ contient la page ET dist/vendor/ avec :
-ffmpeg/ (classe + worker), util/, core-st/ (mono-thread), core-mt/ (multi-thread).
+## Lyrics
+La chanson joue, on tape le gros bouton au debut de chaque ligne (ou barre
+espace au clavier). Correction ligne par ligne, import .lrc existant,
+sauvegarde automatique de la session, export **.lrc** (lecteurs de musique)
+et **.srt** (sous-titres video).
 
-## Deployer sur Vercel
-
-Le vercel.json configure tout (build + en-tetes). Il suffit d'importer le depot :
-
-1. Poussez ces fichiers a la racine d'un depot GitHub.
-2. Sur https://vercel.com -> Add New -> Project -> Import.
-3. Framework Preset : Other. Ne touchez pas aux commandes : Vercel lit
-   vercel.json (Build = bash build.sh, Output = dist).
-4. Deploy. Le build telecharge ffmpeg puis publie le site.
-
-Verifiez dans les logs de build la ligne « Contenu de dist/vendor » : les
-fichiers ffmpeg-core.wasm (core-st ET core-mt) doivent apparaitre.
-
-### Verifier que le multi-thread est actif
-Une fois en ligne, ouvrez la console et tapez : crossOriginIsolated
-- true  -> multi-thread actif (journal : « Mode multi-thread active »).
-- false -> en-tetes COOP/COEP non appliques ; l'app tourne en mono-thread.
-  Verifiez que vercel.json est bien a la racine et redeployez.
-
-## Reglages (curseurs)
-
-- Sensibilite : plus haut = garde les passages parles plus doux.
-- Silence minimum : un blanc plus court n'est pas coupe. Sur une video
-  longue, MONTEZ-LE (0,5-1 s) pour reduire le nombre de segments.
-- Marge conservee : coussin de temps avant/apres chaque phrase.
+---
 
 ## v5 : moteur TURBO (WebCodecs)
 

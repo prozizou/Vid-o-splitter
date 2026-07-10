@@ -1,8 +1,8 @@
 {
   "id": "/",
-  "name": "Video Silence Cutter",
-  "short_name": "SilenceCut",
-  "description": "Supprime automatiquement les silences d'une vidéo, directement sur votre appareil. Aucune donnée envoyée en ligne.",
+  "name": "Studio Vidéo",
+  "short_name": "Studio",
+  "description": "Boîte à outils vidéo et audio : silences, écho, mastering voix, paroles synchronisées. 100 % sur votre appareil.",
   "lang": "fr",
   "dir": "ltr",
   "start_url": "/?source=pwa",
@@ -13,6 +13,12 @@
   "background_color": "#0f172a",
   "theme_color": "#0f172a",
   "categories": ["utilities", "multimedia", "productivity"],
+  "shortcuts": [
+    { "name": "Splitter", "url": "/splitter.html", "description": "Supprimer les silences d'une vidéo" },
+    { "name": "Echo Remover", "url": "/echo.html", "description": "Réduire l'écho d'une voix" },
+    { "name": "Audio Studio", "url": "/studio.html", "description": "Nettoyer et masteriser une piste voix" },
+    { "name": "Lyrics", "url": "/lyrics.html", "description": "Synchroniser des paroles" }
+  ],
   "icons": [
     { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
     { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },

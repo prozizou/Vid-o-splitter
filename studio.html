@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Audio Studio — Studio Vidéo</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <meta name="theme-color" content="#0f172a">
+  <link rel="icon" href="/icons/favicon.ico" sizes="any">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="container">
+  <a class="back" href="/">← Menu</a>
+  <h1>🎚️ Audio Studio</h1>
+  <p class="subtitle">Chaîne de traitement voix : porte de bruit → égaliseur → compresseur → normalisation. Avec pré-écoute en direct.</p>
+
+  <div class="drop-zone" id="dropZone">
+    📂 Glissez-déposez un fichier audio ou vidéo<br>ou cliquez pour sélectionner
+    <input type="file" id="fileInput" accept="audio/*,video/*">
+  </div>
+
+  <div class="controls">
+    <div class="control">
+      <label for="preset">Préréglage</label>
+      <select id="preset">
+        <option value="voice" selected>Voix / narration</option>
+        <option value="podcast">Podcast chaud</option>
+        <option value="music">Musique (léger)</option>
+        <option value="repair">Réparation (enregistrement faible)</option>
+        <option value="custom">Personnalisé</option>
+      </select>
+    </div>
+
+    <div class="control">
+      <label>Porte de bruit <b id="gateVal">-45 dB</b></label>
+      <input type="range" id="gateThr" min="-70" max="-25" step="1" value="-45">
+      <small class="hint">Coupe le souffle entre les phrases. Plus haut = plus agressif.</small>
+    </div>
+  </div>
+
+  <div class="panel">
+    <b>Égaliseur 7 bandes</b>
+    <div class="eq-bands" id="eqBands"></div>
+    <label class="check"><input type="checkbox" id="hp" checked> Coupe-bas 85 Hz</label>
+  </div>
+
+  <div class="controls">
+    <div class="control">
+      <label>Compression <b id="compVal">Moyenne</b></label>
+      <input type="range" id="comp" min="0" max="10" step="1" value="5">
+      <small class="hint">Rend le volume plus régulier. 0 = désactivée.</small>
+    </div>
+    <div class="control">
+      <label>Volume cible <b id="loudVal">-16 LUFS (streaming)</b></label>
+      <input type="range" id="loud" min="-24" max="-10" step="1" value="-16">
+      <small class="hint">-16 pour le web et les podcasts, -14 pour les réseaux sociaux.</small>
+    </div>
+  </div>
+
+  <div id="status"></div>
+  <div class="progress hidden" id="progressContainer"><div class="progress-bar" id="progressBar"></div></div>
+
+  <div class="actions">
+    <button class="btn btn-ghost" id="previewBtn" disabled>🎧 Pré-écouter (10 s en direct)</button>
+    <button class="btn" id="processBtn" disabled>🎚️ Traiter tout le fichier</button>
+  </div>
+
+  <section class="compare hidden" id="compareBox">
+    <h2>Écouter et comparer</h2>
+    <div class="compare-row"><span>Avant</span><audio id="beforeAudio" controls preload="metadata"></audio></div>
+    <div class="compare-row"><span>Après</span><audio id="afterAudio" controls preload="metadata"></audio></div>
+  </section>
+
+  <div class="actions hidden" id="exportBox">
+    <a class="btn" id="dlWav" download="audio_studio.wav">⬇️ Enregistrer en WAV</a>
+    <button class="btn btn-ghost" id="dlM4a">⬇️ Enregistrer en M4A (plus léger)</button>
+    <button class="btn btn-ghost hidden" id="dlVideo">🎬 Réinjecter dans la vidéo d'origine</button>
+  </div>
+  <video id="videoOut" class="preview hidden" controls playsinline preload="metadata"></video>
+  <a class="btn hidden" id="dlVideoLink" download="video_audio_studio.mp4">⬇️ Enregistrer la vidéo</a>
+
+  <div class="log hidden" id="logOutput"></div>
+</div>
+<script type="module" src="studio.js"></script>
+<script>
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});
+</script>
+</body>
+</html>

@@ -184,3 +184,68 @@ h1 { font-size: 2rem; margin-bottom: 0.5rem; }
 .st-pending { color: #64748b; }
 .part-body:not(:empty) { margin-top: .6rem; }
 .part-preview { width: 100%; border-radius: .5rem; background: #000; margin-bottom: .5rem; }
+
+/* ---------- Menu d'accueil ---------- */
+.menu { display: flex; flex-direction: column; gap: .7rem; margin: 1.25rem 0; }
+.menu-card {
+  display: flex; align-items: center; gap: .9rem;
+  background: #1e293b; border: 1px solid #334155; border-radius: .9rem;
+  padding: 1rem; text-decoration: none; color: inherit;
+  transition: border-color .15s, transform .1s;
+}
+.menu-card:active { transform: scale(.985); }
+.menu-card:hover { border-color: #38bdf8; }
+.menu-icon { font-size: 1.7rem; }
+.menu-body { flex: 1; display: flex; flex-direction: column; gap: .2rem; }
+.menu-body b { font-size: 1rem; }
+.menu-body small { color: #94a3b8; font-size: .78rem; line-height: 1.4; }
+.menu-go { color: #475569; font-size: 1.4rem; }
+.foot { text-align: center; color: #64748b; font-size: .75rem; margin-top: 1.5rem; }
+.back {
+  display: inline-block; color: #94a3b8; text-decoration: none;
+  font-size: .85rem; margin-bottom: .5rem;
+}
+.back:hover { color: #e2e8f0; }
+
+/* ---------- Comparaison avant / après ---------- */
+.compare { margin: 1.25rem 0; }
+.compare h2 { font-size: 1rem; margin-bottom: .6rem; }
+.compare-row {
+  display: flex; align-items: center; gap: .6rem; margin-bottom: .5rem;
+}
+.compare-row span { width: 3.2rem; font-size: .78rem; color: #94a3b8; }
+.compare-row audio { flex: 1; min-width: 0; height: 40px; }
+
+/* ---------- Zone de texte (Lyrics) ---------- */
+textarea {
+  width: 100%; margin-top: .35rem; padding: .7rem;
+  border-radius: .6rem; border: 1px solid #334155;
+  background: #0f172a; color: #e2e8f0; font: inherit; font-size: .9rem;
+  resize: vertical;
+}
+textarea:focus-visible { outline: 2px solid #38bdf8; outline-offset: 2px; }
+
+/* ---------- Synchronisation des paroles ---------- */
+.sync { margin: 1.25rem 0; }
+.sync audio { width: 100%; margin-bottom: .8rem; }
+.sync-lines {
+  max-height: 40vh; overflow-y: auto; border: 1px solid #334155;
+  border-radius: .75rem; background: #0b1220; padding: .4rem; margin-bottom: .8rem;
+}
+.sync-line {
+  display: flex; gap: .6rem; padding: .45rem .5rem; border-radius: .5rem;
+  font-size: .88rem; cursor: pointer; align-items: baseline;
+}
+.sync-line:hover { background: #16233b; }
+.sync-line.current { background: #16324a; outline: 1px solid #38bdf8; }
+.sync-line.stamped .sync-time { color: #4ade80; }
+.sync-time {
+  font-variant-numeric: tabular-nums; color: #64748b; font-size: .75rem;
+  min-width: 4.4rem;
+}
+.sync-text { flex: 1; }
+.tap-btn {
+  width: 100%; padding: 1.1rem; font-size: 1rem; margin-bottom: .6rem;
+  background: #0369a1;
+}
+.tap-btn:active { transform: scale(.97); }

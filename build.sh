@@ -6,7 +6,9 @@ set -euo pipefail
 echo "▶ Build : préparation de dist/"
 rm -rf dist
 mkdir -p dist/vendor
-cp index.html app.js turbo.js style.css manifest.webmanifest sw.js dist/
+cp index.html splitter.html echo.html studio.html lyrics.html \
+   app.js turbo.js media.js echo.js studio.js lyrics.js \
+   style.css manifest.webmanifest sw.js dist/
 cp -R icons dist/icons
 
 # fetch_pkg <nom-npm> <version> <dossier-cible> <sous-dossier-dans-le-paquet>
