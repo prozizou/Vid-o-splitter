@@ -3,7 +3,7 @@
    - Met en cache à la volée les gros fichiers ffmpeg (/vendor/*) au 1er usage
      => l'app fonctionne hors-ligne dès la 2e ouverture.
 */
-const VERSION = 'v3.0.0';
+const VERSION = 'v5.0.0';
 const SHELL_CACHE  = `shell-${VERSION}`;
 const VENDOR_CACHE = `vendor-${VERSION}`;
 
@@ -11,6 +11,7 @@ const SHELL = [
   '/',
   '/index.html',
   '/app.js',
+  '/turbo.js',
   '/style.css',
   '/manifest.webmanifest',
   '/icons/icon-192.png',

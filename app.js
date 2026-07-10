@@ -1,4 +1,5 @@
 import { FFmpeg } from '/vendor/ffmpeg/index.js';
+import { turboSupported, turboAnalyze, turboRenderAll, turboJoin } from './turbo.js';
 
 // ==================== CONFIGURATION ====================
 const CONFIG = {
@@ -59,6 +60,7 @@ let canMount = false;
 let running = false;
 let paused = false;
 let job = null;          // { key, chunks: [...], duration }
+let engine = 'turbo';    // 'turbo' (WebCodecs) | 'compat' (ffmpeg.wasm)
 let finalURL = null;
 
 // ==================== UTILITAIRES ====================
@@ -225,6 +227,21 @@ bind('crf',  'crfVal',  v => {
 const chunkSel = $('chunk');
 chunkSel.addEventListener('change', () => { CONFIG.chunkMode = chunkSel.value; });
 CONFIG.chunkMode = chunkSel.value;
+
+// --- Choix du moteur ---
+const engineSel = $('engine'), engineNote = $('engineNote');
+const TURBO_OK = turboSupported();
+function refreshEngine() {
+  engine = engineSel.value === 'compat' || !TURBO_OK ? 'compat' : 'turbo';
+  engineNote.textContent = engine === 'turbo'
+    ? '⚡ Encodage par la puce vidéo du téléphone. 10× à 50× plus rapide.'
+    : (TURBO_OK
+        ? '🐢 Encodage logiciel ffmpeg. Plus lent, mais accepte tous les formats.'
+        : '🐢 WebCodecs indisponible sur ce navigateur : moteur logiciel utilisé.');
+}
+if (!TURBO_OK) { engineSel.value = 'compat'; engineSel.disabled = true; }
+engineSel.addEventListener('change', refreshEngine);
+refreshEngine();
 
 // --- Égaliseur ---
 const eqPreset = $('eqPreset'), eqBands = $('eqBands'), eqTag = $('eqTag');
@@ -453,22 +470,25 @@ async function extractPCM(ff, inPath) {
   return new Int16Array(raw.buffer, raw.byteOffset, Math.floor(raw.byteLength / 2));
 }
 
-async function detectSegments(pcm) {
-  const sr = ANALYSIS_SR, len = pcm.length, dur = len / sr;
+// Enveloppe RMS calculée sur le PCM extrait par ffmpeg (moteur compatible).
+function loudFromPCM(pcm, sr) {
+  const len = pcm.length;
   const win = Math.max(1, Math.floor(sr * CONFIG.windowSec));
-  const winSec = win / sr;
   const nWin = Math.ceil(len / win);
   const loud = new Float32Array(nWin);
-
   let wi = 0;
   for (let i = 0; i < len; i += win) {
     const end = Math.min(i + win, len);
     let sum = 0, n = 0;
     for (let j = i; j < end; j++) { const s = pcm[j] / 32768; sum += s * s; n++; }
     loud[wi++] = Math.sqrt(sum / n);
-    if ((wi & 1023) === 0) { phaseProgress(i / len); await yieldNow(); }
   }
+  return { loud, winSec: win / sr, duration: len / sr };
+}
 
+// À partir de l'enveloppe RMS : seuil adaptatif puis machine à états.
+function segmentsFromLoud(loud, winSec, duration) {
+  const nWin = loud.length;
   const sorted = Float32Array.from(loud).sort();
   const pct = q => sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))];
   let thr = Math.max(pct(0.10) * 2.5, pct(0.90) * 0.06);
@@ -481,9 +501,9 @@ async function detectSegments(pcm) {
     if (loud[k] > thr) { if (start === null) start = k; lastLoud = k; }
     else if (start !== null && (k - lastLoud) >= minSilWin) { raw.push([start * winSec, (lastLoud + 1) * winSec]); start = null; }
   }
-  if (start !== null) raw.push([start * winSec, Math.min(dur, (lastLoud + 1) * winSec)]);
+  if (start !== null) raw.push([start * winSec, Math.min(duration, (lastLoud + 1) * winSec)]);
 
-  const padded = raw.map(([s, e]) => [Math.max(0, s - CONFIG.padding), Math.min(dur, e + CONFIG.padding)]);
+  const padded = raw.map(([s, e]) => [Math.max(0, s - CONFIG.padding), Math.min(duration, e + CONFIG.padding)]);
   const merged = [];
   for (const [s, e] of padded) {
     const last = merged[merged.length - 1];
@@ -491,10 +511,10 @@ async function detectSegments(pcm) {
     else merged.push([s, e]);
   }
   const final = merged.filter(([s, e]) => e - s >= CONFIG.minSegmentDur);
-  if (final.length === 0) final.push([0, dur]);
+  if (final.length === 0) final.push([0, duration]);
 
   const kept = final.reduce((a, [s, e]) => a + (e - s), 0);
-  return { segments: final, duration: dur, kept };
+  return { segments: final, duration, kept };
 }
 
 // ==================== PLAN DE DÉCOUPE ====================
@@ -688,23 +708,37 @@ processBtn.addEventListener('click', async () => {
   await askNotify();
   await keepAwake(true);
 
-  let input = null;
+  let input = null, ff = null;
   try {
-    const ff = await getFFmpeg();
-    input = await openInput(ff);
 
     // --- 1. Analyse (sautée si on reprend une session) --------------
     if (!job || job.chunks.some(c => !c.segs && c.status !== 'done')) {
       setStatus('🔍 Analyse audio en cours...');
-      setPhase(0, 0.06, 'Analyse audio');
-      const pcm = await extractPCM(ff, input.path);
-      setPhase(0.06, 0.04, 'Détection des silences');
-      const { segments, duration, kept } = await detectSegments(pcm);
+      setPhase(0, 0.08, 'Analyse audio');
+
+      let loud, winSec, duration;
+      if (engine === 'turbo') {
+        try {
+          ({ loud, winSec, duration } = await turboAnalyze(videoFile, CONFIG.windowSec, phaseProgress));
+        } catch (e) {
+          log('⚠️ Analyse turbo impossible (' + e.message + '). Passage au moteur logiciel.');
+          engine = 'compat';
+        }
+      }
+      if (engine === 'compat') {
+        ff = await getFFmpeg();
+        input = await openInput(ff);
+        const pcm = await extractPCM(ff, input.path);
+        ({ loud, winSec, duration } = loudFromPCM(pcm, ANALYSIS_SR));
+      }
+
+      setPhase(0.08, 0.02, 'Détection des silences');
+      const { segments, kept } = segmentsFromLoud(loud, winSec, duration);
+      await yieldNow();
       log(`🎤 ${segments.length} segments — ${fmtTime(duration - kept)} de silence retiré sur ${fmtTime(duration)}.`);
 
       const fresh = planChunks(segments, duration);
       if (job && job.key === fileKey(videoFile) && job.chunks.length === fresh.length) {
-        // Reprise : on réinjecte les segments dans les parties déjà connues.
         fresh.forEach((f, i) => { job.chunks[i].segs = f.segs; });
       } else {
         await dbWipe();
@@ -719,34 +753,73 @@ processBtn.addEventListener('click', async () => {
 
     // --- 2. Traitement partie par partie ---------------------------
     clock = { start: performance.now(), doneSec: 0, totalSec: todo.reduce((a, c) => a + c.kept, 0), curSec: 0, curFrac: 0 };
-    const span = 0.90 / todo.length;
 
-    for (let k = 0; k < todo.length; k++) {
-      if (paused) { setStatus('⏸️ En pause. Les parties terminées sont conservées.'); break; }
-      const c = todo[k];
-      c.status = 'running'; updatePartRow(c);
-      setStatus(`⚙️ Partie ${c.index + 1}/${job.chunks.length} — ${c.segs.length} segment(s)`);
-      setPhase(0.10 + k * span, span, `Partie ${c.index + 1}/${job.chunks.length}`);
-      clock.curSec = c.kept; clock.curFrac = 0;
-
-      try {
-        c.blob = await renderChunk(ff, input.path, c);
-        c.status = 'done';
-        await dbPut(PARTS, `${job.key}:${c.index}`, c.blob);
-        await saveJobMeta();
-      } catch (e) {
-        c.status = 'error'; updatePartRow(c); refreshPartsTag();
-        throw e;
-      }
-      clock.doneSec += c.kept; clock.curSec = 0; clock.curFrac = 0;
+    const finishPart = async (c, blob) => {
+      c.blob = blob; c.status = 'done';
+      await dbPut(PARTS, `${job.key}:${c.index}`, blob);
+      await saveJobMeta();
       updatePartRow(c); refreshPartsTag();
       await yieldNow();
+    };
+
+    if (engine === 'turbo') {
+      try {
+        await turboRenderAll(videoFile, job.chunks, {
+          crf: CONFIG.crf, fadeSec: CONFIG.audioFadeSec,
+          eq: { freqs: EQ_FREQS, gains: EQ.gains, q: EQ.q, highpass: EQ.highpass, normalize: EQ.normalize },
+        }, {
+          shouldStop: () => paused,
+          onPartStart: c => {
+            c.status = 'running'; updatePartRow(c);
+            setStatus(`⚡ Partie ${c.index + 1}/${job.chunks.length} — ${c.segs.length} segment(s)`);
+            setPhase(0.10, 0.88, `Partie ${c.index + 1}/${job.chunks.length}`);
+            clock.curSec = c.kept; clock.curFrac = 0;
+          },
+          onProgress: sec => {
+            clock.doneSec = sec; clock.curSec = 0; clock.curFrac = 0;
+            paintProgress(0.10 + 0.88 * (sec / Math.max(clock.totalSec, 1e-6)));
+            updateEta();
+          },
+          onPartDone: finishPart,
+        });
+      } catch (e) {
+        const doneAny = job.chunks.some(c => c.status === 'done');
+        log('⚠️ Moteur turbo interrompu : ' + e.message);
+        if (doneAny) throw e;
+        log('↩️ Bascule sur le moteur logiciel ffmpeg.');
+        engine = 'compat';
+        engineSel.value = 'compat'; refreshEngine();
+        job.chunks.forEach(c => { if (c.status !== 'done') c.status = 'pending'; updatePartRow(c); });
+      }
+    }
+
+    if (engine === 'compat') {
+      if (!ff) { ff = await getFFmpeg(); }
+      if (!input) { input = await openInput(ff); }
+      const left = job.chunks.filter(c => c.status !== 'done');
+      const span = 0.88 / Math.max(left.length, 1);
+      for (let k = 0; k < left.length; k++) {
+        if (paused) { setStatus('⏸️ En pause. Les parties terminées sont conservées.'); break; }
+        const c = left[k];
+        c.status = 'running'; updatePartRow(c);
+        setStatus(`⚙️ Partie ${c.index + 1}/${job.chunks.length} — ${c.segs.length} segment(s)`);
+        setPhase(0.10 + k * span, span, `Partie ${c.index + 1}/${job.chunks.length}`);
+        clock.curSec = c.kept; clock.curFrac = 0;
+        try {
+          await finishPart(c, await renderChunk(ff, input.path, c));
+        } catch (e) {
+          c.status = 'error'; updatePartRow(c); refreshPartsTag(); throw e;
+        }
+        clock.doneSec += c.kept; clock.curSec = 0; clock.curFrac = 0;
+      }
     }
 
     if (!paused) paintProgress(1);
     const done = job.chunks.filter(c => c.status === 'done').length;
     if (!paused) {
-      setStatus(`🎉 ${done}/${job.chunks.length} parties prêtes. Vérifiez les aperçus, puis réunissez-les.`);
+      const speed = clock.totalSec && clock.start
+        ? ` (${(clock.doneSec / ((performance.now() - clock.start) / 1000)).toFixed(1)}× temps réel)` : '';
+      setStatus(`🎉 ${done}/${job.chunks.length} parties prêtes${speed}. Vérifiez les aperçus, puis réunissez-les.`);
       notify('Traitement terminé', `${done} partie(s) prêtes à être réunies.`);
     }
   } catch (err) {
@@ -796,8 +869,15 @@ joinBtn.addEventListener('click', async () => {
   await keepAwake(true);
 
   try {
-    const ff = await getFFmpeg();
-    const blob = await joinParts(ff, parts);
+    let blob;
+    if (engine === 'turbo') {
+      try { blob = await turboJoin(parts.map(c => c.blob)); }
+      catch (e) { log('⚠️ Réunion turbo impossible (' + e.message + '). Passage à ffmpeg.'); }
+    }
+    if (!blob) {
+      const ff = await getFFmpeg();
+      blob = await joinParts(ff, parts);
+    }
     paintProgress(1);
 
     if (finalURL) URL.revokeObjectURL(finalURL);

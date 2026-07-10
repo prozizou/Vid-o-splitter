@@ -55,33 +55,70 @@ Une fois en ligne, ouvrez la console et tapez : crossOriginIsolated
   longue, MONTEZ-LE (0,5-1 s) pour reduire le nombre de segments.
 - Marge conservee : coussin de temps avant/apres chaque phrase.
 
-## Videos longues : decoupe -> traitement -> reconstruction (v3)
+## v5 : moteur TURBO (WebCodecs)
 
-Une vidéo longue ne passe plus dans un seul filter_complex. Le pipeline est :
+Le goulot d'etranglement n'etait pas le decoupage : c'etait **x264 compile en
+WebAssembly**, qui encode a ~0,2x le temps reel. Une heure de video = cinq heures
+d'attente, meme en multi-thread.
 
-1. **Analyse** : ffmpeg extrait une piste mono 8 kHz (quelques Mo, même sur 1 h)
-   et l'app y detecte les silences. Plus de decodage Web Audio de plusieurs Go.
-2. **Plan de decoupe** : les segments a garder sont regroupes en tranches
-   (~4 min, 40 segments max). Les frontieres tombent TOUJOURS dans un silence
-   supprime : aucune image perdue, aucune coupe au milieu d'un mot.
-3. **Traitement** : chaque tranche est encodee separement en MPEG-TS, avec
-   `-output_ts_offset` pour que les horodatages restent continus. Des qu'une
-   tranche est prete elle sort de la memoire ffmpeg (Blob cote navigateur).
-4. **Reconstruction** : les tranches sont collees bout a bout et remuxees en MP4
-   avec `-c copy` (aucun reencodage, donc rapide et sans perte).
+Le moteur **Turbo** confie l'encodage a la **puce video du telephone** via
+WebCodecs : 10x a 50x plus rapide, et l'encodeur materiel chauffe moins la batterie.
 
-Le fichier source est **monte** via WORKERFS : ffmpeg le lit sans le recopier
-dans le tas WebAssembly (limite a ~2 Go). Repli automatique sur `writeFile`
-si le montage n'est pas disponible.
+    mp4box.js  ->  VideoDecoder (materiel)
+                       |
+                       v  (les GOP entierement silencieux ne sont JAMAIS decodes)
+                   VideoEncoder (materiel)  ->  mp4-muxer  ->  partie MP4
+                   AudioDecoder -> egaliseur (OfflineAudioContext) -> AudioEncoder
 
-### Reglage « Traitement par tranches »
-- **Automatique** : une passe sous 5 min, tranches de 4 min au-dela.
-- **2 min** : a choisir sur un telephone a memoire limitee ou en cas d'erreur
-  « Memoire saturee ».
-- **Une seule passe** : ancien comportement, pour les clips courts.
+Une seule passe sur le fichier, dans l'ordre des parties. La reunion finale
+re-empile les paquets deja encodes : aucune image n'est reencodee.
 
-Conseils : gardez le telephone branche, et augmentez « Silence minimum » pour
-reduire le nombre de segments.
+### Le moteur « Compatible » reste la
+Selecteur **Moteur** en haut. Turbo par defaut. On retombe automatiquement sur
+ffmpeg.wasm si :
+- WebCodecs est absent (vieux navigateur, certains iOS) ;
+- le fichier n'est pas un MP4/MOV lisible par mp4box (MKV, WebM, AVI...) ;
+- aucun encodeur H.264 materiel n'est expose.
+
+Le repli est silencieux et journalise. Si des parties ont deja ete produites en
+Turbo, on ne bascule pas en cours de route (les flux seraient incompatibles) :
+l'erreur est affichee et les parties deja pretes restent enregistrables.
+
+### Egaliseur en mode Turbo
+Les filtres `equalizer` de ffmpeg sont remplaces par des **BiquadFilterNode**
+natifs dans un `OfflineAudioContext` (peaking x7 + coupe-bas + compresseur).
+Meme resultat, calcul quasi instantane. La case « phase lineaire » ne concerne
+que le moteur ffmpeg.
+
+### Parties independantes
+Chaque partie est encodee en MP4 autonome, apparait avec son apercu et son
+bouton d'enregistrement des qu'elle est prete, pendant que les suivantes
+continuent. Le bouton « Reunir toutes les parties » assemble le MP4 final.
+
+### Traitement long / arriere-plan
+Un navigateur **ne peut pas** poursuivre un encodage si l'application est fermee.
+Ce qui est fait a la place :
+- **Wake Lock** : l'ecran ne se met plus en veille.
+- La boucle d'analyse utilise `MessageChannel` (non bride) au lieu de
+  `setTimeout` : l'onglet en arriere-plan continue a pleine vitesse.
+- **Chaque partie terminee est enregistree dans IndexedDB.** Onglet plante,
+  memoire saturee, app fermee : rechargez le meme fichier, un bandeau propose
+  de reprendre.
+- **Pause** propre apres la partie en cours, et **notification** a la fin.
+
+### Progression
+Barre + pourcentage, phase en cours (« Partie 3/12 »), temps restant estime et
+vitesse reelle (`12.4x` en Turbo, `0.2x` en Compatible).
+
+### Reglage « Duree des parties »
+- **Automatique** : une seule partie sous 5 min, parties de 4 min au-dela.
+- **2 min** : telephone a memoire limitee.
+- **Une seule partie** : pour les clips courts.
+
+### Dependances ajoutees au build
+`mp4box` (demultiplexage) et `mp4-muxer` (multiplexage), telechargees dans
+`dist/vendor/` pendant le build Vercel, en meme temps que ffmpeg. Le build
+echoue bruyamment si l'un des deux manque.
 
 ## Installer comme application (PWA)
 
