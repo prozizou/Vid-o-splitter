@@ -15,6 +15,30 @@ audio OU video), export WAV, conversion M4A, reinjection de l'audio traite dans
 la video d'origine (`-c:v copy`, l'image n'est jamais reencodee), et une FFT
 autonome pour le traitement spectral.
 
+## Transitions du Splitter (v6.1)
+
+Panneau **Transitions** en haut de `/splitter.html`. Fichier : `sfx.js`.
+
+**Fondu au noir** (0 a 200 ms, defaut 60 ms) de part et d'autre de chaque
+raccord. Jamais applique au tout debut ni a la toute fin du film ; applique aux
+coutures entre parties, ce qui masque les seams. Bride a `duree_segment / 2.5`
+pour qu'un segment court ne soit pas devore par son propre fondu.
+
+**Son de transition** : Clic leger, Souffle doux, Whoosh, Tic montant. Aucun
+fichier audio n'est telecharge, tout est synthetise (bruit deterministe, pas de
+`Math.random` : le rendu est identique a chaque passage). Volume reglable, -18 dB
+par defaut. Bouton d'ecoute pour choisir sans rien traiter. Le son demarre 30 %
+avant le raccord : l'oreille l'entend annoncer la coupe.
+
+Les deux moteurs donnent le meme resultat :
+- **turbo** : fondu par `OffscreenCanvas` (seules les images du fondu sont
+  redessinees), son melange dans le PCM apres l'egaliseur.
+- **ffmpeg** : filtres `fade` par segment, et un « lit » WAV de la duree de la
+  partie contenant deja les bruitages, mixe via `amix=normalize=0` (la voix
+  n'est pas baissee). Repli automatique sans bruitage si `amix` echoue.
+
+Le son passe apres l'egaliseur : il n'est jamais colore par les reglages de voix.
+
 ## Echo Remover
 Soustraction spectrale trame par trame (STFT 1024/256, fenetre de Hann) :
 l'estimation de la reverberation tardive (moyenne exponentielle reglee par la

@@ -72,6 +72,28 @@
     </div>
   </div>
 
+  <details class="panel" id="fxPanel" open>
+    <summary>✨ Transitions <span class="tag" id="fxTag">Fondu léger</span></summary>
+
+    <div class="control">
+      <label>Fondu au noir à chaque raccord <b id="fadeVal">Très léger (60 ms)</b></label>
+      <input type="range" id="fade" min="0" max="0.2" step="0.01" value="0.06">
+      <small class="hint">Adoucit la coupe. Jamais appliqué au tout début ni à la toute fin de la vidéo.</small>
+    </div>
+
+    <div class="control">
+      <label for="sfx">Son de transition</label>
+      <select id="sfx"></select>
+    </div>
+
+    <div class="control">
+      <label>Volume du son <b id="sfxGainVal">-18 dB</b></label>
+      <input type="range" id="sfxGain" min="-30" max="-6" step="1" value="-18">
+    </div>
+
+    <button class="btn btn-ghost btn-small" id="sfxTest" type="button">🔊 Écouter le son</button>
+  </details>
+
   <details class="panel" id="eqPanel">
     <summary>🎚️ Égaliseur voix <span class="tag" id="eqTag">Neutre</span></summary>
 

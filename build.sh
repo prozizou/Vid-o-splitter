@@ -7,7 +7,7 @@ echo "▶ Build : préparation de dist/"
 rm -rf dist
 mkdir -p dist/vendor
 cp index.html splitter.html echo.html studio.html lyrics.html \
-   app.js turbo.js media.js echo.js studio.js lyrics.js \
+   app.js turbo.js media.js sfx.js echo.js studio.js lyrics.js \
    style.css manifest.webmanifest sw.js dist/
 cp -R icons dist/icons
 

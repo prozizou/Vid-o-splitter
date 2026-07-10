@@ -16,6 +16,8 @@
    (app.js) bascule automatiquement sur le moteur ffmpeg.
    ========================================================================== */
 
+import { mixBed, alphaAt } from './sfx.js';
+
 const MUXER_URL = '/vendor/mp4-muxer/mp4-muxer.mjs';
 const MP4BOX_URL = '/vendor/mp4box/mp4box.all.js';
 
@@ -274,7 +276,7 @@ async function pickVideoConfig(w, h, fps, crf) {
 // ==================== RENDU DE TOUTES LES PARTIES ====================
 /**
  * @param parts  [{ index, t0, t1, segs: [[s,e],...] }]  (secondes)
- * @param opts   { crf, eq: {freqs, gains, q, highpass, normalize}, fadeSec }
+ * @param opts   { crf, eq, audioFadeSec, videoFadeSec, sfx: {type, gainDb} }
  * @param cb     { onPartStart, onPartDone, onProgress, shouldStop }
  */
 export async function turboRenderAll(file, parts, opts, cb) {
@@ -345,8 +347,18 @@ export async function turboRenderAll(file, parts, opts, cb) {
 
   let processedSec = 0;
 
+  // Toile hors écran : sert uniquement à assombrir les images du fondu.
+  const fadeUs = Math.round((opts.videoFadeSec || 0) * US);
+  let canvas = null, ctx2d = null;
+  if (fadeUs > 0) {
+    canvas = new OffscreenCanvas(W, H);
+    ctx2d = canvas.getContext('2d', { alpha: false });
+  }
+
   // --- Boucle sur les parties ---------------------------------------
-  for (const part of parts) {
+  for (let pi = 0; pi < parts.length; pi++) {
+    const part = parts[pi];
+    const isFirst = pi === 0, isLast = pi === parts.length - 1;
     if (cb.shouldStop && cb.shouldStop()) break;
     if (part.status === 'done') { processedSec += part.kept; continue; }
     cb.onPartStart && cb.onPartStart(part);
@@ -358,8 +370,17 @@ export async function turboRenderAll(file, parts, opts, cb) {
       map.push({ s: Math.round(s * US), e: Math.round(e * US), off: Math.round(off * US) });
       off += e - s;
     }
-    const partDur = off;
+    const partDurUs = Math.round(off * US);
     const inRange = ts => map.find(m => ts >= m.s && ts < m.e);
+
+    // Instants des raccords, en sortie. On ne fond pas le tout début du film
+    // ni sa toute fin : seulement les coupes internes et les coutures de parties.
+    const fadePts = [];
+    map.forEach((m, i) => { if (!(i === 0 && isFirst)) fadePts.push(m.off); });
+    if (!isLast) fadePts.push(partDurUs);
+    const sfxPtsSec = map
+      .filter((_, i) => !(i === 0 && isFirst))
+      .map(m => m.off / US);
 
     const target = new ArrayBufferTarget();
     const muxer = new Muxer({
@@ -380,7 +401,21 @@ export async function turboRenderAll(file, parts, opts, cb) {
       const m = inRange(frame.timestamp);
       if (!m) { frame.close(); return; }
       const outTs = m.off + (frame.timestamp - m.s);
-      const out = new VideoFrame(frame, { timestamp: outTs, duration: frame.duration || Math.round(US / fps) });
+      const dur = frame.duration || Math.round(US / fps);
+
+      // Fondu au noir très bref de part et d'autre de chaque raccord.
+      const alpha = fadeUs ? alphaAt(outTs, fadePts, fadeUs) : 1;
+      let out;
+      if (alpha < 0.999) {
+        ctx2d.globalAlpha = 1;
+        ctx2d.fillStyle = '#000';
+        ctx2d.fillRect(0, 0, W, H);
+        ctx2d.globalAlpha = alpha;
+        ctx2d.drawImage(frame, 0, 0, W, H);
+        out = new VideoFrame(canvas, { timestamp: outTs, duration: dur });
+      } else {
+        out = new VideoFrame(frame, { timestamp: outTs, duration: dur });
+      }
       frame.close();
       const key = firstFrame || (outTs - lastKey) >= 2 * US;
       if (key) lastKey = outTs;
@@ -447,7 +482,7 @@ export async function turboRenderAll(file, parts, opts, cb) {
 
     // --- Audio : fondus, égaliseur, encodage -----------------------
     if (aT && pieces[0].length) {
-      const fade = Math.max(1, Math.round((opts.fadeSec || 0.008) * aSR));
+      const fade = Math.max(1, Math.round((opts.audioFadeSec || 0.008) * aSR));
       for (const chan of pieces) {
         for (const p of chan) {
           const f = Math.min(fade, p.length >> 1);
@@ -462,6 +497,11 @@ export async function turboRenderAll(file, parts, opts, cb) {
       });
       pieces.forEach(c => (c.length = 0));
       channels = await applyEQ(channels, aSR, opts.eq);
+
+      // Le son de transition passe APRÈS l'égaliseur : il n'est pas coloré.
+      if (opts.sfx && opts.sfx.type !== 'none') {
+        mixBed(channels, aSR, sfxPtsSec, opts.sfx.type, opts.sfx.gainDb);
+      }
 
       const aenc = new AudioEncoder({
         output: (chunk, meta) => muxer.addAudioChunk(chunk, meta),
@@ -488,7 +528,7 @@ export async function turboRenderAll(file, parts, opts, cb) {
     muxer.finalize();
     const blob = new Blob([target.buffer], { type: 'video/mp4' });
 
-    processedSec += partDur / US;
+    processedSec += partDurUs / US;
     cb.onProgress && cb.onProgress(processedSec);
     await cb.onPartDone(part, blob);
   }

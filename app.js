@@ -1,5 +1,6 @@
 import { FFmpeg } from '/vendor/ffmpeg/index.js';
 import { turboSupported, turboAnalyze, turboRenderAll, turboJoin } from './turbo.js';
+import { SFX_TYPES, makeBedWav } from './sfx.js';
 
 // ==================== CONFIGURATION ====================
 const CONFIG = {
@@ -12,6 +13,9 @@ const CONFIG = {
   absFloor:      0.004,  // plancher d'amplitude absolu
   crf:           23,     // qualité vidéo : bas = meilleure qualité
   chunkMode:     'auto', // 'auto' | 'off' | durée d'une partie en secondes
+  videoFadeSec:  0.06,   // fondu au noir de part et d'autre de chaque raccord
+  sfxType:       'none', // son de transition (voir SFX_TYPES)
+  sfxGainDb:     -18,    // volume du son de transition
 };
 
 const ANALYSIS_SR       = 8000; // Hz : piste mono basse fréquence pour l'analyse
@@ -227,6 +231,57 @@ bind('crf',  'crfVal',  v => {
 const chunkSel = $('chunk');
 chunkSel.addEventListener('change', () => { CONFIG.chunkMode = chunkSel.value; });
 CONFIG.chunkMode = chunkSel.value;
+
+// --- Transitions ---
+const fadeSel = $('fade'), fadeVal = $('fadeVal');
+const sfxSel = $('sfx'), sfxGain = $('sfxGain'), sfxGainVal = $('sfxGainVal'), sfxTest = $('sfxTest');
+
+for (const [k, label] of Object.entries(SFX_TYPES)) {
+  const o = document.createElement('option');
+  o.value = k; o.textContent = label;
+  sfxSel.appendChild(o);
+}
+sfxSel.value = CONFIG.sfxType;
+
+const fadeLabel = v => (v === 0 ? 'Aucun' : v <= 0.05 ? `Très léger (${Math.round(v * 1000)} ms)`
+                       : v <= 0.10 ? `Léger (${Math.round(v * 1000)} ms)` : `Marqué (${Math.round(v * 1000)} ms)`);
+const fxTag = $('fxTag');
+function paintFx() {
+  const bits = [];
+  if (CONFIG.videoFadeSec > 0) bits.push('Fondu');
+  if (CONFIG.sfxType !== 'none') bits.push(SFX_TYPES[CONFIG.sfxType]);
+  fxTag.textContent = bits.length ? bits.join(' + ') : 'Coupe franche';
+  fxTag.classList.toggle('tag-on', bits.length > 0);
+}
+fadeSel.addEventListener('input', () => { CONFIG.videoFadeSec = +fadeSel.value; fadeVal.textContent = fadeLabel(CONFIG.videoFadeSec); paintFx(); });
+fadeVal.textContent = fadeLabel(CONFIG.videoFadeSec);
+fadeSel.value = CONFIG.videoFadeSec;
+
+sfxSel.addEventListener('change', () => {
+  CONFIG.sfxType = sfxSel.value;
+  sfxTest.disabled = CONFIG.sfxType === 'none';
+  sfxGain.disabled = CONFIG.sfxType === 'none';
+  paintFx();
+});
+sfxGain.addEventListener('input', () => { CONFIG.sfxGainDb = +sfxGain.value; sfxGainVal.textContent = `${CONFIG.sfxGainDb} dB`; });
+sfxGainVal.textContent = `${CONFIG.sfxGainDb} dB`;
+sfxTest.disabled = true; sfxGain.disabled = true;
+paintFx();
+
+// Écoute du son choisi, sans rien traiter.
+sfxTest.addEventListener('click', async () => {
+  if (CONFIG.sfxType === 'none') return;
+  const { renderSfx } = await import('./sfx.js');
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const s = renderSfx(CONFIG.sfxType, ctx.sampleRate);
+  const buf = ctx.createBuffer(1, s.length, ctx.sampleRate);
+  const d = buf.getChannelData(0);
+  const g = Math.pow(10, CONFIG.sfxGainDb / 20) * 6; // remonté pour l'écoute seule
+  for (let i = 0; i < s.length; i++) d[i] = Math.max(-1, Math.min(1, s[i] * g));
+  const src = ctx.createBufferSource();
+  src.buffer = buf; src.connect(ctx.destination); src.start();
+  src.onended = () => ctx.close().catch(() => {});
+});
 
 // --- Choix du moteur ---
 const engineSel = $('engine'), engineNote = $('engineNote');
@@ -546,14 +601,24 @@ function planChunks(segments, duration) {
   }));
 }
 
-function buildFilter(segs, offset, chain) {
+function buildFilter(segs, offset, chain, opts) {
+  const { fadeSec = 0, isFirst = true, isLast = true, hasBed = false } = opts || {};
   const parts = [];
   segs.forEach(([s, e], i) => {
     const S = Math.max(0, s - offset);
     const E = Math.max(S + 0.02, e - offset);
     const d = E - S;
     const f = Math.min(CONFIG.audioFadeSec, d / 2);
-    parts.push(`[0:v:0]trim=start=${S.toFixed(4)}:end=${E.toFixed(4)},setpts=PTS-STARTPTS[v${i}]`);
+
+    // Fondu au noir : jamais sur le tout début du film ni sur sa toute fin.
+    const vf = Math.min(fadeSec, d / 2.5);
+    const fadeIn = vf > 0 && !(isFirst && i === 0);
+    const fadeOut = vf > 0 && !(isLast && i === segs.length - 1);
+    let vchain = `trim=start=${S.toFixed(4)}:end=${E.toFixed(4)},setpts=PTS-STARTPTS`;
+    if (fadeIn) vchain += `,fade=t=in:st=0:d=${vf.toFixed(4)}`;
+    if (fadeOut) vchain += `,fade=t=out:st=${(d - vf).toFixed(4)}:d=${vf.toFixed(4)}`;
+    parts.push(`[0:v:0]${vchain}[v${i}]`);
+
     parts.push(
       `[0:a:0]atrim=start=${S.toFixed(4)}:end=${E.toFixed(4)},asetpts=PTS-STARTPTS,` +
       `afade=t=in:st=0:d=${f.toFixed(4)},afade=t=out:st=${(d - f).toFixed(4)}:d=${f.toFixed(4)}[a${i}]`
@@ -561,55 +626,98 @@ function buildFilter(segs, offset, chain) {
   });
   const inputs = segs.map((_, i) => `[v${i}][a${i}]`).join('');
   let g = `${parts.join(';')};${inputs}concat=n=${segs.length}:v=1:a=1[outv][araw]`;
-  g += chain.length ? `;[araw]${chain.join(',')}[outa]` : ';[araw]anull[outa]';
+  g += chain.length ? `;[araw]${chain.join(',')}[aeq]` : ';[araw]anull[aeq]';
+
+  if (hasBed) {
+    // Le lit sonore est une 2e entrée : on aligne format et débit avant amix.
+    // Attention : [a0]..[aN] sont déjà pris par les segments, d'où [mixA]/[mixB].
+    const fmt = 'aformat=sample_rates=44100:channel_layouts=stereo';
+    g += `;[aeq]${fmt}[mixA];[1:a]${fmt}[mixB];[mixA][mixB]amix=inputs=2:duration=first:normalize=0[outa]`;
+  } else {
+    g += ';[aeq]anull[outa]';
+  }
   return g;
 }
 
 // ==================== RENDU D'UNE PARTIE ====================
 async function renderChunk(ff, inPath, c) {
   const name = `part_${String(c.index).padStart(3, '0')}.mp4`;
-  const argsFor = chain => ([
-    '-ss', c.t0.toFixed(3),
-    '-t', (c.t1 - c.t0).toFixed(3),
-    '-i', inPath,
-    '-filter_complex', buildFilter(c.segs, c.t0, chain),
-    '-map', '[outv]', '-map', '[outa]',
-    '-threads', '0',
-    ...V_ARGS, '-crf', String(CONFIG.crf),
-    ...A_ARGS,
-    '-movflags', '+faststart',
-    name,
-  ]);
+  const isFirst = c.index === 0;
+  const isLast = c.index === job.chunks.length - 1;
 
-  // Repli automatique : phase linéaire -> biquad -> aucun filtre audio.
-  const ladder = [];
-  if (EQ.linear) ladder.push({ chain: audioChain(true), note: null });
-  ladder.push({ chain: audioChain(false), note: EQ.linear ? '⚠️ Phase linéaire indisponible : égaliseur classique utilisé.' : null });
-  ladder.push({ chain: [], note: '⚠️ Égaliseur indisponible : partie encodée sans traitement audio.' });
+  // Instants des raccords dans la partie rendue (pour le son de transition).
+  const sfxPts = [];
+  let off = 0;
+  c.segs.forEach(([s, e], i) => {
+    if (!(isFirst && i === 0)) sfxPts.push(off);
+    off += e - s;
+  });
+  const partDur = off;
 
-  let lastErr;
-  for (let i = 0; i < ladder.length; i++) {
-    const step = ladder[i];
-    if (i > 0 && JSON.stringify(step.chain) === JSON.stringify(ladder[i - 1].chain)) continue;
-    try {
-      await run(ff, argsFor(step.chain));
-      lastErr = null;
-      break;
-    } catch (e) {
-      lastErr = e;
-      try { await ff.deleteFile(name); } catch {}
-      if (i === ladder.length - 1) throw e;
-      if (step.chain.length === 0) throw e;
-      log(ladder[i + 1].note || '⚠️ Nouvel essai avec des filtres audio simplifiés.');
-    }
+  // Le lit sonore : un WAV silencieux de la durée de la partie, avec les
+  // bruitages déjà placés. Une seule entrée supplémentaire pour ffmpeg.
+  let bedWritten = false;
+  const wantBed = CONFIG.sfxType !== 'none' && sfxPts.length > 0;
+  if (wantBed) {
+    const { fetchFile } = await import('/vendor/util/index.js');
+    const wav = makeBedWav(partDur, 44100, sfxPts, CONFIG.sfxType, CONFIG.sfxGainDb);
+    await ff.writeFile('bed.wav', await fetchFile(wav));
+    bedWritten = true;
   }
-  if (lastErr) throw lastErr;
 
-  const data = await ff.readFile(name);
-  try { await ff.deleteFile(name); } catch {}
-  // La partie quitte immédiatement le tas WebAssembly : le Blob vit côté
-  // navigateur (déchargeable sur disque), la mémoire de ffmpeg reste basse.
-  return new Blob([data.buffer], { type: 'video/mp4' });
+  const argsFor = (chain, hasBed) => {
+    const args = [
+      '-ss', c.t0.toFixed(3),
+      '-t', (c.t1 - c.t0).toFixed(3),
+      '-i', inPath,
+    ];
+    if (hasBed) args.push('-i', 'bed.wav');
+    args.push(
+      '-filter_complex', buildFilter(c.segs, c.t0, chain, {
+        fadeSec: CONFIG.videoFadeSec, isFirst, isLast, hasBed,
+      }),
+      '-map', '[outv]', '-map', '[outa]',
+      '-threads', '0',
+      ...V_ARGS, '-crf', String(CONFIG.crf),
+      ...A_ARGS,
+      '-movflags', '+faststart',
+      name,
+    );
+    return args;
+  };
+
+  // Repli automatique : son+EQ -> son+biquad -> EQ seul -> rien.
+  const ladder = [];
+  if (EQ.linear) ladder.push({ chain: audioChain(true), bed: bedWritten });
+  ladder.push({ chain: audioChain(false), bed: bedWritten, note: EQ.linear ? '⚠️ Phase linéaire indisponible : égaliseur classique utilisé.' : null });
+  if (bedWritten) ladder.push({ chain: audioChain(false), bed: false, note: '⚠️ Mixage du son de transition impossible : partie rendue sans bruitage.' });
+  ladder.push({ chain: [], bed: false, note: '⚠️ Filtres audio indisponibles : partie encodée sans traitement.' });
+
+  try {
+    let lastErr = null;
+    for (let i = 0; i < ladder.length; i++) {
+      const step = ladder[i];
+      const prev = ladder[i - 1];
+      if (prev && JSON.stringify(step.chain) === JSON.stringify(prev.chain) && step.bed === prev.bed) continue;
+      try {
+        await run(ff, argsFor(step.chain, step.bed));
+        lastErr = null;
+        break;
+      } catch (e) {
+        lastErr = e;
+        try { await ff.deleteFile(name); } catch {}
+        if (i === ladder.length - 1) throw e;
+        log(ladder[i + 1].note || '⚠️ Nouvel essai avec des filtres simplifiés.');
+      }
+    }
+    if (lastErr) throw lastErr;
+
+    const data = await ff.readFile(name);
+    try { await ff.deleteFile(name); } catch {}
+    return new Blob([data.buffer], { type: 'video/mp4' });
+  } finally {
+    if (bedWritten) { try { await ff.deleteFile('bed.wav'); } catch {} }
+  }
 }
 
 // ==================== RÉUNION DES PARTIES ====================
@@ -765,7 +873,10 @@ processBtn.addEventListener('click', async () => {
     if (engine === 'turbo') {
       try {
         await turboRenderAll(videoFile, job.chunks, {
-          crf: CONFIG.crf, fadeSec: CONFIG.audioFadeSec,
+          crf: CONFIG.crf,
+          audioFadeSec: CONFIG.audioFadeSec,
+          videoFadeSec: CONFIG.videoFadeSec,
+          sfx: { type: CONFIG.sfxType, gainDb: CONFIG.sfxGainDb },
           eq: { freqs: EQ_FREQS, gains: EQ.gains, q: EQ.q, highpass: EQ.highpass, normalize: EQ.normalize },
         }, {
           shouldStop: () => paused,
