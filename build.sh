@@ -28,27 +28,59 @@ fetch_pkg "@ffmpeg/util"    "0.12.1"  "dist/vendor/util"    "dist/esm"
 fetch_pkg "@ffmpeg/core"    "0.12.6"  "dist/vendor/core-st" "dist/esm"   # mono-thread
 fetch_pkg "@ffmpeg/core-mt" "0.12.6"  "dist/vendor/core-mt" "dist/esm"   # multi-thread
 
-# --- Moteur turbo (WebCodecs) : demultiplexeur + multiplexeur MP4 ---
-# On resout la derniere version publiee : evite qu'un numero fige casse le build.
-fetch_latest() {
-  local name="$1" dest="$2" sub="$3"
-  local url; url="$(curl -fsSL "https://registry.npmjs.org/${name}/latest" \
-    | sed -n 's/.*"tarball":"\([^"]*\)".*/\1/p')"
-  local tmp; tmp="$(mktemp -d)"
-  echo "  ↓ ${name}@latest"
-  curl -fsSL "$url" -o "$tmp/p.tgz"
-  tar -xzf "$tmp/p.tgz" -C "$tmp"
+# --- Moteur turbo (WebCodecs) : demultiplexeur + multiplexeur MP4 ---------
+# On ne devine PAS l'arborescence du paquet : on cherche le fichier voulu
+# n'importe ou dedans. Si la derniere version ne convient pas, on retombe sur
+# une version epinglee connue. En cas d'echec, on affiche ce que contient le
+# paquet pour qu'on sache quoi corriger.
+
+npm_tarball() {   # <nom> <version|latest>
+  curl -fsSL "https://registry.npmjs.org/$1/$2" \
+    | tr ',' '\n' \
+    | sed -n 's/.*"tarball":"\([^"]*\)".*/\1/p' \
+    | head -1
+}
+
+fetch_file() {    # <nom> <version|latest> <fichier-recherche> <dossier-cible>
+  local name="$1" ver="$2" want="$3" dest="$4"
+  local url tmp found
+
+  url="$(npm_tarball "$name" "$ver" || true)"
+  if [ -z "$url" ]; then
+    echo "  ✖ ${name}@${ver} : introuvable sur le registre npm"
+    return 1
+  fi
+
+  tmp="$(mktemp -d)"
+  if ! curl -fsSL "$url" -o "$tmp/p.tgz" || ! tar -xzf "$tmp/p.tgz" -C "$tmp"; then
+    echo "  ✖ ${name}@${ver} : telechargement ou extraction impossible"
+    rm -rf "$tmp"; return 1
+  fi
+
+  found="$(find "$tmp/package" -type f -name "$want" | head -1)"
+  if [ -z "$found" ]; then
+    echo "  ✖ ${want} absent de ${name}@${ver}. Fichiers livres :"
+    find "$tmp/package" -type f \( -name '*.js' -o -name '*.mjs' \) \
+      | sed "s|$tmp/package|     .|" | head -20
+    rm -rf "$tmp"; return 1
+  fi
+
   mkdir -p "$dest"
-  cp -R "$tmp/package/${sub}/." "$dest/"
+  cp "$found" "$dest/"
+  echo "  ✔ ${name}@${ver} -> ${dest}/$(basename "$found")"
   rm -rf "$tmp"
 }
 
-fetch_latest "mp4box"    "dist/vendor/mp4box"    "dist"
-fetch_latest "mp4-muxer" "dist/vendor/mp4-muxer" "build"
+echo "▶ Moteur turbo : mp4box + mp4-muxer"
 
-# Verification : les deux fichiers cles doivent exister, sinon le build echoue.
-test -f dist/vendor/mp4box/mp4box.all.js    || { echo "✖ mp4box.all.js manquant";    exit 1; }
-test -f dist/vendor/mp4-muxer/mp4-muxer.mjs || { echo "✖ mp4-muxer.mjs manquant";    exit 1; }
+fetch_file "mp4box" "latest" "mp4box.all.js" "dist/vendor/mp4box" \
+  || fetch_file "mp4box" "0.5.2" "mp4box.all.js" "dist/vendor/mp4box" \
+  || { echo "✖ Impossible de recuperer mp4box. Le moteur turbo ne peut pas etre construit."; exit 1; }
+
+fetch_file "mp4-muxer" "latest" "mp4-muxer.mjs" "dist/vendor/mp4-muxer" \
+  || fetch_file "mp4-muxer" "5.1.5" "mp4-muxer.mjs" "dist/vendor/mp4-muxer" \
+  || fetch_file "mp4-muxer" "4.4.2" "mp4-muxer.mjs" "dist/vendor/mp4-muxer" \
+  || { echo "✖ Impossible de recuperer mp4-muxer. Le moteur turbo ne peut pas etre construit."; exit 1; }
 
 echo "▶ Contenu de dist/vendor :"
 find dist/vendor -maxdepth 2 -type f | sort
