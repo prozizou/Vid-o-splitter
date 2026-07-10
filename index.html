@@ -47,6 +47,17 @@
       <label>Qualité vidéo <b id="crfVal">Équilibrée</b></label>
       <input type="range" id="crf" min="18" max="30" step="1" value="23">
     </div>
+    <div class="control">
+      <label for="chunk">Traitement par tranches</label>
+      <select id="chunk">
+        <option value="auto" selected>Automatique (recommandé)</option>
+        <option value="120">Tranches de 2 min (mémoire limitée)</option>
+        <option value="240">Tranches de 4 min</option>
+        <option value="480">Tranches de 8 min</option>
+        <option value="off">Une seule passe (vidéos courtes)</option>
+      </select>
+      <small class="hint">La vidéo est découpée dans les silences, chaque tranche est traitée séparément, puis tout est reconstruit.</small>
+    </div>
   </div>
 
   <div id="status"></div>

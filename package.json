@@ -1,6 +1,6 @@
 {
   "name": "video-silence-cutter",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "private": true,
   "description": "Supprime les silences d'une vidéo, 100% navigateur, multi-thread ffmpeg.wasm",
   "scripts": {

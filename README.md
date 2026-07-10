@@ -55,16 +55,33 @@ Une fois en ligne, ouvrez la console et tapez : crossOriginIsolated
   longue, MONTEZ-LE (0,5-1 s) pour reduire le nombre de segments.
 - Marge conservee : coussin de temps avant/apres chaque phrase.
 
-## Conseils pour les videos longues (votre cas d'usage)
+## Videos longues : decoupe -> traitement -> reconstruction (v3)
 
-1. Le multi-thread accelere l'encodage d'un facteur ~= nombre de coeurs, mais
-   reencoder plusieurs dizaines de minutes reste intensif. Gardez le telephone
-   BRANCHE.
-2. Augmentez « Silence minimum » pour limiter le nombre de segments.
-3. La memoire du navigateur (~2-4 Go) est la vraie limite : une video tres
-   longue et tres lourde peut echouer. Dans ce cas, decoupez-la en 2-3 parties.
-4. Faites un premier essai sur un extrait court pour valider vos reglages.
+Une vidéo longue ne passe plus dans un seul filter_complex. Le pipeline est :
 
+1. **Analyse** : ffmpeg extrait une piste mono 8 kHz (quelques Mo, même sur 1 h)
+   et l'app y detecte les silences. Plus de decodage Web Audio de plusieurs Go.
+2. **Plan de decoupe** : les segments a garder sont regroupes en tranches
+   (~4 min, 40 segments max). Les frontieres tombent TOUJOURS dans un silence
+   supprime : aucune image perdue, aucune coupe au milieu d'un mot.
+3. **Traitement** : chaque tranche est encodee separement en MPEG-TS, avec
+   `-output_ts_offset` pour que les horodatages restent continus. Des qu'une
+   tranche est prete elle sort de la memoire ffmpeg (Blob cote navigateur).
+4. **Reconstruction** : les tranches sont collees bout a bout et remuxees en MP4
+   avec `-c copy` (aucun reencodage, donc rapide et sans perte).
+
+Le fichier source est **monte** via WORKERFS : ffmpeg le lit sans le recopier
+dans le tas WebAssembly (limite a ~2 Go). Repli automatique sur `writeFile`
+si le montage n'est pas disponible.
+
+### Reglage « Traitement par tranches »
+- **Automatique** : une passe sous 5 min, tranches de 4 min au-dela.
+- **2 min** : a choisir sur un telephone a memoire limitee ou en cas d'erreur
+  « Memoire saturee ».
+- **Une seule passe** : ancien comportement, pour les clips courts.
+
+Conseils : gardez le telephone branche, et augmentez « Silence minimum » pour
+reduire le nombre de segments.
 
 ## Installer comme application (PWA)
 
