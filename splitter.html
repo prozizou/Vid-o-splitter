@@ -29,9 +29,19 @@
   <div class="banner hidden" id="resumeBanner"></div>
 
   <div class="drop-zone" id="dropZone">
-    📂 Glissez-déposez une vidéo ici<br>ou cliquez pour sélectionner
-    <input type="file" id="fileInput" accept="video/*">
+    📂 Glissez-déposez une ou plusieurs vidéos ici<br>ou cliquez pour sélectionner
+    <small class="hint">Plusieurs vidéos ? Elles seront <b>fusionnées dans l'ordre</b> ci-dessous, puis les silences coupés.</small>
+    <input type="file" id="fileInput" accept="video/*" multiple>
   </div>
+
+  <section class="queue hidden" id="queueSection">
+    <div class="queue-head">
+      <b>Vidéos à fusionner <span class="tag" id="queueTag">0</span></b>
+      <button class="btn btn-ghost btn-small" id="queueClear" type="button">Tout retirer</button>
+    </div>
+    <div id="queueList"></div>
+    <small class="hint" id="queueHint"></small>
+  </section>
 
   <div class="controls">
     <div class="control">
