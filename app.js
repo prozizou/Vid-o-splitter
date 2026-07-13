@@ -1,5 +1,5 @@
 import { FFmpeg } from '/vendor/ffmpeg/index.js';
-import { turboSupported, turboAnalyze, turboRenderAll, turboJoin } from './turbo.js';
+import { turboSupported, turboAnalyze, turboRenderAll, turboJoin, turboMerge } from './turbo.js';
 import { SFX_TYPES, makeBedWav } from './sfx.js';
 
 // ==================== CONFIGURATION ====================
@@ -56,8 +56,13 @@ const progressPhase = $('progressPhase'), progressEta = $('progressEta');
 const partsSection = $('partsSection'), partsList = $('partsList'), partsTag = $('partsTag');
 const preview = $('preview'), downloadLink = $('downloadLink');
 const resumeBanner = $('resumeBanner');
+const queueSection = $('queueSection'), queueList = $('queueList');
+const queueTag = $('queueTag'), queueHint = $('queueHint'), queueClear = $('queueClear');
 
-let videoFile = null;
+let sourceFiles = [];    // vidéos ajoutées par l'utilisateur, dans l'ordre de fusion
+let videoFile = null;    // fichier réellement traité (source unique OU fusion des sources)
+let mergedBlob = null;   // résultat de la fusion, mis en cache
+let mergedSig = '';      // signature des sources ayant produit mergedBlob
 let ffmpeg = null;
 let usingMT = false;
 let canMount = false;
@@ -366,31 +371,210 @@ function audioChain(linear) {
   return f;
 }
 
-// ==================== FICHIER ====================
+// ==================== FICHIER(S) ====================
 dropZone.addEventListener('click', () => fileInput.click());
-fileInput.addEventListener('change', handleFile);
+fileInput.addEventListener('change', () => { addFiles(fileInput.files); fileInput.value = ''; });
 dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
 dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
 dropZone.addEventListener('drop', e => {
   e.preventDefault(); dropZone.classList.remove('dragover');
-  if (e.dataTransfer.files.length) { fileInput.files = e.dataTransfer.files; handleFile(); }
+  if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
 });
+queueClear.addEventListener('click', () => { if (!running) { sourceFiles = []; sourcesChanged(); } });
 
-async function handleFile() {
-  const file = fileInput.files[0];
-  if (!file || running) return;
-  videoFile = file;
-  resetOutput();
-  setStatus(`✅ Vidéo chargée : ${file.name} (${fmtSize(file.size)})`);
-  processBtn.disabled = false;
-  processBtn.textContent = '🔪 Détecter et couper les silences';
+// Signature d'un jeu de sources : sert de clé de reprise et de cache de fusion.
+const srcSig = () => sourceFiles.map(fileKey).join('||');
+const currentKey = () => sourceFiles.length <= 1
+  ? (sourceFiles[0] ? fileKey(sourceFiles[0]) : '')
+  : 'merge|' + srcSig();
 
-  const dur = await probeDuration(file);
-  if (videoFile !== file) return;
-  if (dur > AUTO_CHUNK_ABOVE) {
-    setStatus(`✅ ${file.name} — ~${Math.round(dur / 60)} min. Traitement par parties.`);
+// Ajoute des fichiers à la file, en ignorant les doublons (même nom/taille/date).
+function addFiles(list) {
+  if (running) return;
+  const seen = new Set(sourceFiles.map(fileKey));
+  let added = 0;
+  for (const f of list) {
+    if (!f.type.startsWith('video/') && !/\.(mp4|mov|m4v|webm|mkv|avi)$/i.test(f.name)) continue;
+    const k = fileKey(f);
+    if (seen.has(k)) continue;
+    seen.add(k); sourceFiles.push(f); added++;
   }
-  await tryResume(file);
+  if (added) sourcesChanged();
+}
+function removeFile(i) { if (running) return; sourceFiles.splice(i, 1); sourcesChanged(); }
+function moveFile(i, dir) {
+  if (running) return;
+  const j = i + dir;
+  if (j < 0 || j >= sourceFiles.length) return;
+  [sourceFiles[i], sourceFiles[j]] = [sourceFiles[j], sourceFiles[i]];
+  sourcesChanged();
+}
+
+// Toute modification de la liste invalide la fusion et la session en cours.
+async function sourcesChanged() {
+  mergedBlob = null; mergedSig = '';
+  videoFile = sourceFiles.length === 1 ? sourceFiles[0] : null;
+  job = null;
+  resetOutput();
+  renderQueue();
+
+  if (sourceFiles.length === 0) {
+    processBtn.disabled = true;
+    processBtn.textContent = '🔪 Détecter et couper les silences';
+    setStatus('');
+    return;
+  }
+  processBtn.disabled = false;
+  processBtn.textContent = sourceFiles.length > 1
+    ? '🔗 Fusionner puis couper les silences'
+    : '🔪 Détecter et couper les silences';
+
+  if (sourceFiles.length === 1) {
+    setStatus(`✅ Vidéo chargée : ${sourceFiles[0].name} (${fmtSize(sourceFiles[0].size)})`);
+  } else {
+    setStatus(`✅ ${sourceFiles.length} vidéos — elles seront fusionnées dans l'ordre affiché.`);
+  }
+
+  // Estimation de la durée totale (indicatif, pour le mode « parties automatiques »).
+  const sigAtProbe = srcSig();
+  const durs = await Promise.all(sourceFiles.map(probeDuration));
+  if (srcSig() !== sigAtProbe) return; // la liste a changé pendant la sonde
+  const total = durs.reduce((a, d) => a + d, 0);
+  queueHint.textContent = total > 0
+    ? `Durée totale : ~${fmtTime(total)}${total > AUTO_CHUNK_ABOVE ? ' — traitement par parties.' : ''}`
+    : '';
+  await tryResume();
+}
+
+function renderQueue() {
+  const n = sourceFiles.length;
+  queueSection.classList.toggle('hidden', n < 2);
+  queueTag.textContent = String(n);
+  queueClear.classList.toggle('hidden', n === 0);
+  queueList.innerHTML = '';
+  sourceFiles.forEach((f, i) => {
+    const row = document.createElement('div');
+    row.className = 'queue-item';
+    row.innerHTML = `
+      <span class="queue-num">${i + 1}</span>
+      <span class="queue-info">
+        <span class="queue-name">${escapeHtml(f.name)}</span>
+        <span class="queue-meta">${fmtSize(f.size)}</span>
+      </span>
+      <span class="queue-btns">
+        <button type="button" class="qup" title="Monter" ${i === 0 ? 'disabled' : ''}>↑</button>
+        <button type="button" class="qdown" title="Descendre" ${i === n - 1 ? 'disabled' : ''}>↓</button>
+        <button type="button" class="qdel" title="Retirer">✕</button>
+      </span>`;
+    row.querySelector('.qup').addEventListener('click', () => moveFile(i, -1));
+    row.querySelector('.qdown').addEventListener('click', () => moveFile(i, +1));
+    row.querySelector('.qdel').addEventListener('click', () => removeFile(i));
+    queueList.appendChild(row);
+  });
+}
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// ==================== FUSION DES SOURCES ====================
+// Produit UN seul MP4 à partir de toutes les vidéos ajoutées. Voie rapide :
+// réempilage des paquets sans réencodage (turboMerge) quand les formats
+// concordent. Repli : concaténation + réencodage uniforme via ffmpeg.
+async function ensureMerged() {
+  if (sourceFiles.length === 1) return sourceFiles[0];
+  if (mergedBlob && mergedSig === srcSig()) return mergedBlob;
+
+  setStatus(`🔗 Fusion de ${sourceFiles.length} vidéos…`);
+  setPhase(0, 0.05, 'Fusion des vidéos'); paintProgress(0);
+
+  let blob = null;
+  if (engine === 'turbo') {
+    try {
+      blob = await turboMerge(sourceFiles, f => phaseProgress(f));
+      log(`🔗 Fusion rapide (sans réencodage) de ${sourceFiles.length} vidéos.`);
+    } catch (e) {
+      if (e.message === 'INCOMPATIBLE') log('ℹ️ Formats vidéo différents : fusion avec réencodage (plus lent).');
+      else log('⚠️ Fusion rapide impossible (' + e.message + '). Réencodage via ffmpeg.');
+    }
+  }
+  if (!blob) {
+    const ff = await getFFmpeg();
+    blob = await ffmpegMerge(ff, sourceFiles);
+    log(`🔗 Fusion (réencodage) de ${sourceFiles.length} vidéos terminée.`);
+  }
+
+  mergedBlob = new File([blob], 'fusion.mp4', { type: 'video/mp4', lastModified: Date.now() });
+  mergedSig = srcSig();
+  paintProgress(0.05);
+  return mergedBlob;
+}
+
+// Repli robuste : met toutes les entrées au même format (échelle + fps + audio)
+// puis les concatène. Réencode l'ensemble — c'est le prix d'accepter des formats
+// hétérogènes (résolutions, codecs, WebM/MKV…).
+async function ffmpegMerge(ff, files) {
+  // Dimensions cible = première vidéo (sinon 1280×720 par défaut).
+  let W = 0, H = 0;
+  try { ({ w: W, h: H } = await probeSize(files[0])); } catch {}
+  if (!W || !H) { W = 1280; H = 720; }
+  W += W % 2; H += H % 2; // libx264 exige des dimensions paires
+  const FPS = 30;
+
+  const named = files.map((f, i) => {
+    const ext = (f.name.split('.').pop() || 'mp4').toLowerCase().replace(/[^a-z0-9]/g, '') || 'mp4';
+    return { name: `m${String(i).padStart(2, '0')}.${ext}`, data: f };
+  });
+
+  const doMerge = async (dir) => {
+    const inputs = [];
+    named.forEach(n => inputs.push('-i', `${dir}/${n.name}`));
+    const vf = [], af = [], cc = [];
+    named.forEach((_, i) => {
+      cc.push(
+        `[${i}:v]scale=${W}:${H}:force_original_aspect_ratio=decrease,` +
+        `pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=${FPS},format=yuv420p[v${i}]`);
+      cc.push(`[${i}:a]aformat=sample_rates=44100:channel_layouts=stereo[a${i}]`);
+      vf.push(`[v${i}]`); af.push(`[a${i}]`);
+    });
+    const pairs = named.map((_, i) => `[v${i}][a${i}]`).join('');
+    const graph = cc.join(';') + ';' + pairs + `concat=n=${named.length}:v=1:a=1[outv][outa]`;
+    await run(ff, [
+      ...inputs,
+      '-filter_complex', graph,
+      '-map', '[outv]', '-map', '[outa]',
+      '-threads', '0',
+      ...V_ARGS, '-crf', String(CONFIG.crf),
+      ...A_ARGS,
+      '-movflags', '+faststart',
+      'merged.mp4',
+    ]);
+    const data = await ff.readFile('merged.mp4');
+    try { await ff.deleteFile('merged.mp4'); } catch {}
+    return new Blob([data.buffer], { type: 'video/mp4' });
+  };
+
+  if (canMount) {
+    try {
+      await mountBlobs(ff, '/merge', named);
+      try { return await doMerge('/merge'); }
+      finally { await unmountQuiet(ff, '/merge'); }
+    } catch { log('ℹ️ Fusion directe impossible : copie en mémoire.'); }
+  }
+  const { fetchFile } = await import('/vendor/util/index.js');
+  for (const n of named) await ff.writeFile(n.name, await fetchFile(n.data));
+  try { return await doMerge('.'); }
+  finally { for (const n of named) { try { await ff.deleteFile(n.name); } catch {} } }
+}
+
+function probeSize(file) {
+  return new Promise((resolve, reject) => {
+    const v = document.createElement('video');
+    const u = URL.createObjectURL(file);
+    v.preload = 'metadata';
+    v.onloadedmetadata = () => { URL.revokeObjectURL(u); resolve({ w: v.videoWidth, h: v.videoHeight }); };
+    v.onerror = () => { URL.revokeObjectURL(u); reject(new Error('métadonnées illisibles')); };
+    v.src = u;
+  });
 }
 
 function probeDuration(file) {
@@ -416,10 +600,10 @@ function resetOutput() {
 }
 
 // ==================== REPRISE ====================
-async function tryResume(file) {
+async function tryResume() {
   const meta = await dbGet(META, 'job');
   resumeBanner.classList.add('hidden');
-  if (!meta || meta.key !== fileKey(file)) return;
+  if (!meta || meta.key !== currentKey()) return;
 
   const chunks = [];
   let doneCount = 0;
@@ -807,7 +991,7 @@ function refreshPartsTag() {
 
 // ==================== FLUX PRINCIPAL ====================
 processBtn.addEventListener('click', async () => {
-  if (!videoFile || running) return;
+  if (!sourceFiles.length || running) return;
   running = true; paused = false;
   processBtn.disabled = true;
   pauseBtn.classList.remove('hidden');
@@ -818,6 +1002,11 @@ processBtn.addEventListener('click', async () => {
 
   let input = null, ff = null;
   try {
+
+    // --- 0. Fusion des sources (transparente pour la suite) --------
+    // Après cette étape, videoFile est UNE vidéo (source unique ou fusion),
+    // et tout le pipeline ci-dessous fonctionne sans autre changement.
+    videoFile = await ensureMerged();
 
     // --- 1. Analyse (sautée si on reprend une session) --------------
     if (!job || job.chunks.some(c => !c.segs && c.status !== 'done')) {
@@ -846,11 +1035,11 @@ processBtn.addEventListener('click', async () => {
       log(`🎤 ${segments.length} segments — ${fmtTime(duration - kept)} de silence retiré sur ${fmtTime(duration)}.`);
 
       const fresh = planChunks(segments, duration);
-      if (job && job.key === fileKey(videoFile) && job.chunks.length === fresh.length) {
+      if (job && job.key === currentKey() && job.chunks.length === fresh.length) {
         fresh.forEach((f, i) => { job.chunks[i].segs = f.segs; });
       } else {
         await dbWipe();
-        job = { key: fileKey(videoFile), duration, chunks: fresh };
+        job = { key: currentKey(), duration, chunks: fresh };
       }
       await saveJobMeta();
       renderParts();
