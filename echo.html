@@ -34,8 +34,9 @@
     <label class="check"><input type="checkbox" id="gate" checked> Porte de bruit douce entre les phrases</label>
   </div>
 
-  <div id="status"></div>
-  <div class="progress hidden" id="progressContainer"><div class="progress-bar" id="progressBar"></div></div>
+  <div id="status" role="status" aria-live="polite" aria-atomic="true"></div>
+  <div class="progress hidden" id="progressContainer" role="progressbar"
+       aria-valuemin="0" aria-valuemax="100"><div class="progress-bar" id="progressBar"></div></div>
 
   <div class="actions">
     <button class="btn" id="processBtn" disabled>🔇 Réduire l'écho</button>
@@ -55,11 +56,9 @@
   <video id="videoOut" class="preview hidden" controls playsinline preload="metadata"></video>
   <a class="btn hidden" id="dlVideoLink" download="video_sans_echo.mp4">⬇️ Enregistrer la vidéo</a>
 
-  <div class="log hidden" id="logOutput"></div>
+  <div class="log hidden" id="logOutput" role="log" aria-label="Journal technique"></div>
 </div>
 <script type="module" src="echo.js"></script>
-<script>
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});
-</script>
+<script src="/sw-register.js" defer></script>
 </body>
 </html>

@@ -305,3 +305,42 @@ textarea:focus-visible { outline: 2px solid #38bdf8; outline-offset: 2px; }
 .queue-btns button:hover:not(:disabled) { background: #475569; }
 .queue-btns button:disabled { opacity: 0.3; cursor: default; }
 .queue-btns .qdel:hover:not(:disabled) { background: #7f1d1d; }
+
+/* ==================== APERÇU DES COUPES ==================== */
+.actions-preview { margin: 0.75rem 0 0.25rem; }
+
+.cuts {
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 0.7rem;
+  padding: 0.75rem;
+  margin-bottom: 1rem;
+}
+.cuts-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 0.5rem; margin-bottom: 0.5rem;
+}
+.cuts-canvas {
+  display: block;
+  width: 100%; height: auto;
+  border-radius: 0.4rem;
+  background: #0b1220;
+}
+.cuts .hint { display: block; margin-top: 0.5rem; }
+
+/* ==================== ACCESSIBILITÉ ==================== */
+/* Respecte le réglage système « réduire les animations ». Les barres de
+   progression et les défilements automatiques deviennent instantanés. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Écrans larges : l'application reste lisible sans s'étirer à l'infini. */
+@media (min-width: 900px) {
+  .cuts-canvas { height: 160px; object-fit: fill; }
+}

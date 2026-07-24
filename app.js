@@ -1,6 +1,11 @@
-import { FFmpeg } from '/vendor/ffmpeg/index.js';
+// ffmpeg n'est PAS importé statiquement : en mode turbo il ne sert jamais, et
+// un /vendor incomplet (build partiel) faisait échouer le chargement du module
+// entier — donc la page entière, moteur turbo compris. Il est chargé à la
+// demande dans getFFmpeg().
 import { turboSupported, turboAnalyze, turboRenderAll, turboJoin, turboMerge } from './turbo.js';
 import { SFX_TYPES, makeBedWav } from './sfx.js';
+import { segmentsFromLoud, thresholdCurve, planChunks, loudFromPCM } from './silence.js';
+import { fmtSize, fmtTime, probeDuration } from './media.js';
 
 // ==================== CONFIGURATION ====================
 const CONFIG = {
@@ -22,6 +27,22 @@ const ANALYSIS_SR       = 8000; // Hz : piste mono basse fréquence pour l'analy
 const AUTO_CHUNK_ABOVE  = 300;  // au-delà de 5 min, découpe automatique
 const AUTO_CHUNK_SEC    = 240;  // durée cible d'une partie en mode auto
 const MAX_SEG_PER_CHUNK = 40;   // une partie ne dépasse jamais 40 segments
+
+// Réglages passés à silence.js (module pur, testé par `npm test`).
+const silenceCfg = () => ({
+  windowSec:     CONFIG.windowSec,
+  minSilenceDur: CONFIG.minSilenceDur,
+  minSegmentDur: CONFIG.minSegmentDur,
+  padding:       CONFIG.padding,
+  sensitivity:   CONFIG.sensitivity,
+  absFloor:      CONFIG.absFloor,
+});
+const chunkOpts = () => ({
+  chunkMode: CONFIG.chunkMode,
+  autoAbove: AUTO_CHUNK_ABOVE,
+  autoSec: AUTO_CHUNK_SEC,
+  maxSegPerChunk: MAX_SEG_PER_CHUNK,
+});
 
 // Encodage forcé, identique sur toutes les parties : sinon la réunion
 // sans réencodage échoue (paramètres de flux incompatibles).
@@ -58,6 +79,8 @@ const preview = $('preview'), downloadLink = $('downloadLink');
 const resumeBanner = $('resumeBanner');
 const queueSection = $('queueSection'), queueList = $('queueList');
 const queueTag = $('queueTag'), queueHint = $('queueHint'), queueClear = $('queueClear');
+const analyzeBtn = $('analyzeBtn'), cutsSection = $('cutsSection');
+const cutsCanvas = $('cutsCanvas'), cutsTag = $('cutsTag'), cutsHint = $('cutsHint');
 
 let sourceFiles = [];    // vidéos ajoutées par l'utilisateur, dans l'ordre de fusion
 let videoFile = null;    // fichier réellement traité (source unique OU fusion des sources)
@@ -71,6 +94,9 @@ let paused = false;
 let job = null;          // { key, chunks: [...], duration }
 let engine = 'turbo';    // 'turbo' (WebCodecs) | 'compat' (ffmpeg.wasm)
 let finalURL = null;
+let analysis = null;     // { key, loud, winSec, duration } — enveloppe RMS mise en cache
+let analyzing = false;
+let storageWarned = false;
 
 // ==================== UTILITAIRES ====================
 // setTimeout est bridé à 1 s quand l'onglet passe en arrière-plan.
@@ -81,13 +107,6 @@ _chan.port1.onmessage = () => { const w = _waiters.shift(); if (w) w(); };
 const yieldNow = () => new Promise(r => { _waiters.push(r); _chan.port2.postMessage(0); });
 
 const clamp01 = x => Math.max(0, Math.min(1, x || 0));
-const fmtTime = s => {
-  if (!isFinite(s) || s < 0) return '—';
-  s = Math.round(s);
-  const m = Math.floor(s / 60);
-  return m ? `${m} min ${String(s % 60).padStart(2, '0')} s` : `${s} s`;
-};
-const fmtSize = b => `${(b / 1048576).toFixed(1)} Mo`;
 
 function setStatus(msg, cls = '') { statusDiv.className = cls; statusDiv.textContent = msg; }
 function log(msg) {
@@ -165,8 +184,13 @@ async function notify(title, body) {
 // ==================== SAUVEGARDE (IndexedDB) ====================
 // Les parties terminées survivent à une fermeture d'onglet ou à un plantage.
 const DB_NAME = 'silence-cutter', PARTS = 'parts', META = 'meta';
+
+// Une seule connexion, réutilisée : l'ancienne version en ouvrait une par
+// lecture ET par écriture, sans jamais les fermer.
+let _db = null;
 function openDB() {
-  return new Promise((res, rej) => {
+  if (_db) return _db;
+  _db = new Promise((res, rej) => {
     const r = indexedDB.open(DB_NAME, 1);
     r.onupgradeneeded = () => {
       const d = r.result;
@@ -174,9 +198,22 @@ function openDB() {
       if (!d.objectStoreNames.contains(META)) d.createObjectStore(META);
     };
     r.onsuccess = () => res(r.result);
-    r.onerror = () => rej(r.error);
-  });
+    r.onerror = () => { _db = null; rej(r.error); };
+  }).catch(e => { _db = null; throw e; });
+  return _db;
 }
+
+// Demande un stockage persistant : sans cela le navigateur (iOS en tête) peut
+// évincer les parties déjà calculées sans prévenir.
+(async () => {
+  try {
+    if (navigator.storage && navigator.storage.persist && !(await navigator.storage.persisted())) {
+      await navigator.storage.persist();
+    }
+  } catch {}
+})();
+
+/** @returns true si l'écriture a réellement abouti. */
 async function dbPut(store, key, val) {
   try {
     const d = await openDB();
@@ -184,8 +221,20 @@ async function dbPut(store, key, val) {
       const t = d.transaction(store, 'readwrite');
       t.objectStore(store).put(val, key);
       t.oncomplete = res; t.onerror = () => rej(t.error);
+      t.onabort = () => rej(t.error || new Error('transaction annulée'));
     });
-  } catch {}
+    return true;
+  } catch (e) {
+    // Avaler cette erreur — ce que faisait l'ancienne version — affichait
+    // « ✅ Prêt » sur des parties qui n'étaient en réalité PAS sauvegardées.
+    if (!storageWarned) {
+      storageWarned = true;
+      log(`⚠️ Sauvegarde impossible (${e && e.message ? e.message : 'espace insuffisant'}).`);
+      log('   Les parties restent en mémoire : enregistrez-les au fur et à mesure,');
+      log('   elles seront perdues si l\'onglet se ferme.');
+    }
+    return false;
+  }
 }
 async function dbGet(store, key) {
   try {
@@ -197,6 +246,18 @@ async function dbGet(store, key) {
     });
   } catch { return undefined; }
 }
+/** Présence d'une clé, SANS matérialiser le blob en mémoire (getKey). */
+async function dbHas(store, key) {
+  try {
+    const d = await openDB();
+    return await new Promise((res, rej) => {
+      const t = d.transaction(store, 'readonly');
+      const q = t.objectStore(store).getKey(key);
+      q.onsuccess = () => res(q.result !== undefined); q.onerror = () => rej(q.error);
+    });
+  } catch { return false; }
+}
+
 async function dbWipe() {
   try {
     const d = await openDB();
@@ -218,14 +279,18 @@ async function saveJobMeta() {
 }
 
 // ==================== RÉGLAGES (UI) ====================
-const bind = (id, valId, fmt, key) => {
+const bind = (id, valId, fmt, key, affectsCuts = false) => {
   const el = $(id);
-  const upd = () => { CONFIG[key] = parseFloat(el.value); $(valId).textContent = fmt(el.value); };
+  const upd = () => {
+    CONFIG[key] = parseFloat(el.value);
+    $(valId).textContent = fmt(el.value);
+    if (affectsCuts) queueCutsRefresh();
+  };
   el.addEventListener('input', upd); upd();
 };
-bind('sens', 'sensVal', v => `${(+v).toFixed(1)}×`, 'sensitivity');
-bind('sil',  'silVal',  v => `${(+v).toFixed(2)} s`, 'minSilenceDur');
-bind('pad',  'padVal',  v => `${(+v).toFixed(2)} s`, 'padding');
+bind('sens', 'sensVal', v => `${(+v).toFixed(1)}×`, 'sensitivity', true);
+bind('sil',  'silVal',  v => `${(+v).toFixed(2)} s`, 'minSilenceDur', true);
+bind('pad',  'padVal',  v => `${(+v).toFixed(2)} s`, 'padding', true);
 bind('crf',  'crfVal',  v => {
   const n = +v;
   if (n <= 20) return 'Haute (fichier + gros)';
@@ -234,7 +299,7 @@ bind('crf',  'crfVal',  v => {
 }, 'crf');
 
 const chunkSel = $('chunk');
-chunkSel.addEventListener('change', () => { CONFIG.chunkMode = chunkSel.value; });
+chunkSel.addEventListener('change', () => { CONFIG.chunkMode = chunkSel.value; queueCutsRefresh(); });
 CONFIG.chunkMode = chunkSel.value;
 
 // --- Transitions ---
@@ -415,16 +480,20 @@ async function sourcesChanged() {
   mergedBlob = null; mergedSig = '';
   videoFile = sourceFiles.length === 1 ? sourceFiles[0] : null;
   job = null;
+  analysis = null;
+  cutsSection.classList.add('hidden');
   resetOutput();
   renderQueue();
 
   if (sourceFiles.length === 0) {
     processBtn.disabled = true;
+    analyzeBtn.disabled = true;
     processBtn.textContent = '🔪 Détecter et couper les silences';
     setStatus('');
     return;
   }
   processBtn.disabled = false;
+  analyzeBtn.disabled = false;
   processBtn.textContent = sourceFiles.length > 1
     ? '🔗 Fusionner puis couper les silences'
     : '🔪 Détecter et couper les silences';
@@ -437,7 +506,7 @@ async function sourcesChanged() {
 
   // Estimation de la durée totale (indicatif, pour le mode « parties automatiques »).
   const sigAtProbe = srcSig();
-  const durs = await Promise.all(sourceFiles.map(probeDuration));
+  const durs = await Promise.all(sourceFiles.map(f => probeDuration(f).catch(() => 0)));
   if (srcSig() !== sigAtProbe) return; // la liste a changé pendant la sonde
   const total = durs.reduce((a, d) => a + d, 0);
   queueHint.textContent = total > 0
@@ -577,19 +646,9 @@ function probeSize(file) {
   });
 }
 
-function probeDuration(file) {
-  return new Promise(resolve => {
-    const v = document.createElement('video');
-    const u = URL.createObjectURL(file);
-    v.preload = 'metadata';
-    v.onloadedmetadata = () => { URL.revokeObjectURL(u); resolve(v.duration || 0); };
-    v.onerror = () => { URL.revokeObjectURL(u); resolve(0); };
-    v.src = u;
-  });
-}
-
 function resetOutput() {
   if (finalURL) { URL.revokeObjectURL(finalURL); finalURL = null; }
+  releasePartUrls();
   preview.pause(); preview.removeAttribute('src'); preview.load();
   preview.classList.add('hidden');
   downloadLink.classList.add('hidden');
@@ -609,9 +668,10 @@ async function tryResume() {
   let doneCount = 0;
   for (let i = 0; i < meta.chunks.length; i++) {
     const c = { ...meta.chunks[i], index: i, segs: null, blob: null, status: 'pending' };
-    if (meta.chunks[i].status === 'done') {
-      const b = await dbGet(PARTS, `${meta.key}:${i}`);
-      if (b) { c.blob = b; c.status = 'done'; doneCount++; }
+    // On vérifie seulement que la partie EXISTE. La charger ici remettait
+    // toutes les parties déjà calculées en mémoire au simple dépôt du fichier.
+    if (meta.chunks[i].status === 'done' && await dbHas(PARTS, `${meta.key}:${i}`)) {
+      c.status = 'done'; doneCount++;
     }
     chunks.push(c);
   }
@@ -639,6 +699,7 @@ function withTimeout(promise, ms, message) {
 
 async function getFFmpeg() {
   if (ffmpeg) return ffmpeg;
+  const { FFmpeg } = await import('/vendor/ffmpeg/index.js');
   ffmpeg = new FFmpeg();
   ffmpeg.on('log', ({ message }) => { if (!message.includes('frame=')) log(message); });
   ffmpeg.on('progress', ({ progress }) => phaseProgress(progress));
@@ -682,17 +743,17 @@ async function mountBlobs(ff, dir, blobs) {
 }
 async function unmountQuiet(ff, dir) { try { await ff.unmount(dir); } catch {} }
 
-async function openInput(ff) {
-  const ext = (videoFile.name.split('.').pop() || 'mp4').toLowerCase().replace(/[^a-z0-9]/g, '') || 'mp4';
+async function openInput(ff, file = videoFile) {
+  const ext = (file.name.split('.').pop() || 'mp4').toLowerCase().replace(/[^a-z0-9]/g, '') || 'mp4';
   const name = `input.${ext}`;
   if (canMount) {
     try {
-      await mountBlobs(ff, '/src', [{ name, data: videoFile }]);
+      await mountBlobs(ff, '/src', [{ name, data: file }]);
       return { path: `/src/${name}`, cleanup: () => unmountQuiet(ff, '/src') };
     } catch { canMount = false; log('ℹ️ Lecture directe indisponible : copie en mémoire.'); }
   }
   const { fetchFile } = await import('/vendor/util/index.js');
-  await ff.writeFile(name, await fetchFile(videoFile));
+  await ff.writeFile(name, await fetchFile(file));
   return { path: name, cleanup: async () => { try { await ff.deleteFile(name); } catch {} } };
 }
 
@@ -709,80 +770,142 @@ async function extractPCM(ff, inPath) {
   return new Int16Array(raw.buffer, raw.byteOffset, Math.floor(raw.byteLength / 2));
 }
 
-// Enveloppe RMS calculée sur le PCM extrait par ffmpeg (moteur compatible).
-function loudFromPCM(pcm, sr) {
-  const len = pcm.length;
-  const win = Math.max(1, Math.floor(sr * CONFIG.windowSec));
-  const nWin = Math.ceil(len / win);
-  const loud = new Float32Array(nWin);
-  let wi = 0;
-  for (let i = 0; i < len; i += win) {
-    const end = Math.min(i + win, len);
-    let sum = 0, n = 0;
-    for (let j = i; j < end; j++) { const s = pcm[j] / 32768; sum += s * s; n++; }
-    loud[wi++] = Math.sqrt(sum / n);
-  }
-  return { loud, winSec: win / sr, duration: len / sr };
-}
+// ==================== APERÇU DES COUPES ====================
+// L'enveloppe RMS est calculée UNE fois puis mise en cache : bouger un curseur
+// ne relance jamais le décodage, seulement `segmentsFromLoud` (quelques ms).
+// Avant, régler la sensibilité coûtait un cycle de traitement complet.
 
-// À partir de l'enveloppe RMS : seuil adaptatif puis machine à états.
-function segmentsFromLoud(loud, winSec, duration) {
-  const nWin = loud.length;
-  const sorted = Float32Array.from(loud).sort();
-  const pct = q => sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))];
-  let thr = Math.max(pct(0.10) * 2.5, pct(0.90) * 0.06);
-  thr = Math.max(thr / CONFIG.sensitivity, CONFIG.absFloor);
+/** Calcule l'enveloppe RMS (ou renvoie celle déjà en cache). */
+async function ensureAnalysis() {
+  const file = await ensureMerged();
+  const key = currentKey();
+  if (analysis && analysis.key === key) return analysis;
 
-  const minSilWin = Math.max(1, Math.round(CONFIG.minSilenceDur / winSec));
-  const raw = [];
-  let start = null, lastLoud = -1;
-  for (let k = 0; k < nWin; k++) {
-    if (loud[k] > thr) { if (start === null) start = k; lastLoud = k; }
-    else if (start !== null && (k - lastLoud) >= minSilWin) { raw.push([start * winSec, (lastLoud + 1) * winSec]); start = null; }
-  }
-  if (start !== null) raw.push([start * winSec, Math.min(duration, (lastLoud + 1) * winSec)]);
-
-  const padded = raw.map(([s, e]) => [Math.max(0, s - CONFIG.padding), Math.min(duration, e + CONFIG.padding)]);
-  const merged = [];
-  for (const [s, e] of padded) {
-    const last = merged[merged.length - 1];
-    if (last && s <= last[1]) last[1] = Math.max(last[1], e);
-    else merged.push([s, e]);
-  }
-  const final = merged.filter(([s, e]) => e - s >= CONFIG.minSegmentDur);
-  if (final.length === 0) final.push([0, duration]);
-
-  const kept = final.reduce((a, [s, e]) => a + (e - s), 0);
-  return { segments: final, duration, kept };
-}
-
-// ==================== PLAN DE DÉCOUPE ====================
-// Une partie = un paquet de segments consécutifs. Les frontières tombent
-// toujours dans un silence supprimé : aucune coupe au milieu d'un mot.
-function planChunks(segments, duration) {
-  let target;
-  if (CONFIG.chunkMode === 'off') target = Infinity;
-  else if (CONFIG.chunkMode === 'auto') target = duration > AUTO_CHUNK_ABOVE ? AUTO_CHUNK_SEC : Infinity;
-  else target = parseFloat(CONFIG.chunkMode);
-
-  const groups = [];
-  if (!isFinite(target)) groups.push(segments);
-  else {
-    let cur = [];
-    for (const seg of segments) {
-      if (cur.length && (seg[1] - cur[0][0] > target || cur.length >= MAX_SEG_PER_CHUNK)) { groups.push(cur); cur = []; }
-      cur.push(seg);
+  let loud, winSec, duration;
+  if (engine === 'turbo') {
+    try {
+      ({ loud, winSec, duration } = await turboAnalyze(file, CONFIG.windowSec, phaseProgress));
+    } catch (e) {
+      log('⚠️ Analyse turbo impossible (' + e.message + '). Passage au moteur logiciel.');
+      engine = 'compat';
+      engineSel.value = 'compat'; refreshEngine();
     }
-    if (cur.length) groups.push(cur);
   }
-  return groups.map((segs, index) => ({
-    index, segs,
-    t0: segs[0][0],
-    t1: segs[segs.length - 1][1],
-    kept: segs.reduce((a, [s, e]) => a + (e - s), 0),
-    status: 'pending',
-    blob: null,
-  }));
+  if (engine === 'compat') {
+    const ff = await getFFmpeg();
+    const input = await openInput(ff, file);
+    try {
+      const pcm = await extractPCM(ff, input.path);
+      ({ loud, winSec, duration } = loudFromPCM(pcm, ANALYSIS_SR, CONFIG.windowSec));
+    } finally { try { await input.cleanup(); } catch {} }
+  }
+
+  analysis = { key, loud, winSec, duration };
+  return analysis;
+}
+
+/** Recalcule les segments à partir du cache et redessine. Ne décode rien. */
+function refreshCuts() {
+  if (!analysis) return;
+  const { loud, winSec, duration } = analysis;
+  const { segments, kept } = segmentsFromLoud(loud, winSec, duration, silenceCfg());
+  const parts = planChunks(segments, duration, chunkOpts());
+  drawCuts(segments);
+
+  const removed = duration - kept;
+  const pct = duration > 0 ? Math.round((removed / duration) * 100) : 0;
+  cutsTag.textContent = `${segments.length} segments`;
+  cutsHint.textContent =
+    `${fmtTime(removed)} de silence retiré sur ${fmtTime(duration)} (−${pct} %) → ` +
+    `${fmtTime(kept)} de vidéo finale, en ${parts.length} partie(s). ` +
+    `Zones claires = conservées, zones sombres = supprimées.`;
+
+  // Une partie s'arrête aussi au bout de MAX_SEG_PER_CHUNK segments : sans
+  // cette phrase, l'utilisateur qui demande « 4 minutes » et obtient des
+  // parties de 90 s n'a aucun moyen de comprendre pourquoi.
+  if (parts.some(p => p.segs.length >= MAX_SEG_PER_CHUNK)) {
+    cutsHint.textContent +=
+      ` Certaines parties sont plus courtes que demandé : une partie ne dépasse jamais ${MAX_SEG_PER_CHUNK} segments.`;
+  }
+}
+
+/** Dessine l'enveloppe, le seuil et les zones conservées. */
+function drawCuts(segments) {
+  const { loud, winSec, duration } = analysis;
+  const ctx = cutsCanvas.getContext('2d');
+  const W = cutsCanvas.width, H = cutsCanvas.height;
+  const thr = thresholdCurve(loud, winSec, silenceCfg());
+
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#0b1220';
+  ctx.fillRect(0, 0, W, H);
+
+  // Zones conservées en fond clair.
+  ctx.fillStyle = 'rgba(56, 189, 248, 0.16)';
+  for (const [s, e] of segments) {
+    const x0 = (s / duration) * W, x1 = (e / duration) * W;
+    ctx.fillRect(x0, 0, Math.max(1, x1 - x0), H);
+  }
+
+  // Enveloppe RMS : une colonne par pixel, sur le maximum de la tranche.
+  // L'échelle est en racine carrée, sinon la parole normale est écrasée en bas.
+  let peak = 0;
+  for (let i = 0; i < loud.length; i++) if (loud[i] > peak) peak = loud[i];
+  const norm = v => Math.sqrt(Math.min(1, v / (peak || 1)));
+  const perPx = loud.length / W;
+
+  ctx.fillStyle = '#7dd3fc';
+  for (let x = 0; x < W; x++) {
+    const from = Math.floor(x * perPx), to = Math.max(from + 1, Math.floor((x + 1) * perPx));
+    let m = 0;
+    for (let i = from; i < to && i < loud.length; i++) if (loud[i] > m) m = loud[i];
+    const h = norm(m) * (H - 8);
+    ctx.fillRect(x, H - h, 1, h);
+  }
+
+  // Courbe de seuil : elle est adaptative, la voir aide à régler la sensibilité.
+  ctx.strokeStyle = '#f59e0b';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let x = 0; x < W; x++) {
+    const i = Math.min(thr.length - 1, Math.floor(x * perPx));
+    const y = H - norm(thr[i]) * (H - 8);
+    if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+}
+
+analyzeBtn.addEventListener('click', async () => {
+  if (running || analyzing || !sourceFiles.length) return;
+  analyzing = true;
+  analyzeBtn.disabled = true;
+  analyzeBtn.textContent = '⏳ Analyse…';
+  showProgress(true); setPhase(0, 1, 'Analyse audio'); paintProgress(0);
+  try {
+    await ensureAnalysis();
+    cutsSection.classList.remove('hidden');
+    refreshCuts();
+    paintProgress(1);
+    setStatus('👀 Aperçu prêt. Ajustez les réglages : l\'aperçu se met à jour sans rien recalculer.');
+    cutsSection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  } catch (e) {
+    console.error(e);
+    setStatus('❌ Analyse impossible : ' + e.message, 'err');
+  } finally {
+    analyzing = false;
+    analyzeBtn.disabled = false;
+    analyzeBtn.textContent = '🔍 Aperçu des coupes';
+    showProgress(false);
+  }
+});
+
+// Les curseurs qui changent la détection redessinent l'aperçu, au rythme de
+// l'écran (une seule fois par trame, même en glissant vite).
+let cutsQueued = false;
+function queueCutsRefresh() {
+  if (!analysis || cutsQueued) return;
+  cutsQueued = true;
+  requestAnimationFrame(() => { cutsQueued = false; refreshCuts(); });
 }
 
 function buildFilter(segs, offset, chain, opts) {
@@ -956,6 +1079,29 @@ function partRow(c) {
   return row;
 }
 
+// Object URL des aperçus de parties : ils étaient créés pour CHAQUE partie et
+// jamais révoqués. Ils sont désormais créés à la demande et libérés.
+const partUrls = new Map();
+function releasePartUrls() {
+  for (const url of partUrls.values()) URL.revokeObjectURL(url);
+  partUrls.clear();
+}
+function partUrl(index, blob) {
+  const old = partUrls.get(index);
+  if (old) URL.revokeObjectURL(old);
+  const url = URL.createObjectURL(blob);
+  partUrls.set(index, url);
+  return url;
+}
+
+/** Récupère le MP4 d'une partie : mémoire si présent, sinon IndexedDB. */
+async function loadPartBlob(c) {
+  if (c.blob) return c.blob;
+  const b = await dbGet(PARTS, `${job.key}:${c.index}`);
+  if (!b) throw new Error(`la partie ${c.index + 1} est introuvable dans la sauvegarde`);
+  return b;
+}
+
 function updatePartRow(c) {
   const st = $(`ps-${c.index}`), body = $(`pb-${c.index}`);
   if (!st) return;
@@ -963,18 +1109,35 @@ function updatePartRow(c) {
   st.textContent = labels[c.status] || '';
   st.className = `part-status st-${c.status}`;
 
-  if (c.status === 'done' && c.blob && !body.dataset.filled) {
+  if (c.status === 'done' && !body.dataset.filled) {
     body.dataset.filled = '1';
-    const url = URL.createObjectURL(c.blob);
     body.innerHTML = '';
-    const v = document.createElement('video');
-    v.controls = true; v.playsInline = true; v.preload = 'metadata'; v.src = url;
-    v.className = 'part-preview';
-    const a = document.createElement('a');
-    a.className = 'btn btn-ghost btn-small';
-    a.href = url; a.download = `partie_${c.index + 1}.mp4`;
-    a.textContent = `⬇️ Enregistrer cette partie (${fmtSize(c.blob.size)})`;
-    body.append(v, a);
+    // On n'ouvre PAS les 12 parties d'un coup : sur une vidéo d'une heure, cela
+    // remettait plusieurs Go en mémoire avant même le moindre clic.
+    const open = document.createElement('button');
+    open.type = 'button';
+    open.className = 'btn btn-ghost btn-small';
+    open.textContent = '▶️ Ouvrir cette partie';
+    open.addEventListener('click', async () => {
+      open.disabled = true;
+      try {
+        const blob = await loadPartBlob(c);
+        const url = partUrl(c.index, blob);
+        body.innerHTML = '';
+        const v = document.createElement('video');
+        v.controls = true; v.playsInline = true; v.preload = 'metadata'; v.src = url;
+        v.className = 'part-preview';
+        const a = document.createElement('a');
+        a.className = 'btn btn-ghost btn-small';
+        a.href = url; a.download = `partie_${c.index + 1}.mp4`;
+        a.textContent = `⬇️ Enregistrer cette partie (${fmtSize(blob.size)})`;
+        body.append(v, a);
+      } catch (e) {
+        open.disabled = false;
+        setStatus('❌ ' + e.message, 'err');
+      }
+    });
+    body.append(open);
   }
 }
 
@@ -1008,33 +1171,25 @@ processBtn.addEventListener('click', async () => {
     // et tout le pipeline ci-dessous fonctionne sans autre changement.
     videoFile = await ensureMerged();
 
-    // --- 1. Analyse (sautée si on reprend une session) --------------
+    // --- 1. Analyse (sautée si déjà en cache ou si on reprend une session) ---
+    // Si l'aperçu a déjà été demandé, ensureAnalysis() rend la main aussitôt :
+    // le fichier n'est décodé qu'une fois, aperçu et traitement compris.
     if (!job || job.chunks.some(c => !c.segs && c.status !== 'done')) {
       setStatus('🔍 Analyse audio en cours...');
       setPhase(0, 0.08, 'Analyse audio');
 
-      let loud, winSec, duration;
-      if (engine === 'turbo') {
-        try {
-          ({ loud, winSec, duration } = await turboAnalyze(videoFile, CONFIG.windowSec, phaseProgress));
-        } catch (e) {
-          log('⚠️ Analyse turbo impossible (' + e.message + '). Passage au moteur logiciel.');
-          engine = 'compat';
-        }
-      }
-      if (engine === 'compat') {
-        ff = await getFFmpeg();
-        input = await openInput(ff);
-        const pcm = await extractPCM(ff, input.path);
-        ({ loud, winSec, duration } = loudFromPCM(pcm, ANALYSIS_SR));
-      }
+      const { loud, winSec, duration } = await ensureAnalysis();
 
       setPhase(0.08, 0.02, 'Détection des silences');
-      const { segments, kept } = segmentsFromLoud(loud, winSec, duration);
+      const { segments, kept } = segmentsFromLoud(loud, winSec, duration, silenceCfg());
       await yieldNow();
       log(`🎤 ${segments.length} segments — ${fmtTime(duration - kept)} de silence retiré sur ${fmtTime(duration)}.`);
 
-      const fresh = planChunks(segments, duration);
+      // L'aperçu reflète ce qui va réellement être produit.
+      cutsSection.classList.remove('hidden');
+      refreshCuts();
+
+      const fresh = planChunks(segments, duration, chunkOpts());
       if (job && job.key === currentKey() && job.chunks.length === fresh.length) {
         fresh.forEach((f, i) => { job.chunks[i].segs = f.segs; });
       } else {
@@ -1052,8 +1207,11 @@ processBtn.addEventListener('click', async () => {
     clock = { start: performance.now(), doneSec: 0, totalSec: todo.reduce((a, c) => a + c.kept, 0), curSec: 0, curFrac: 0 };
 
     const finishPart = async (c, blob) => {
-      c.blob = blob; c.status = 'done';
-      await dbPut(PARTS, `${job.key}:${c.index}`, blob);
+      c.status = 'done';
+      const saved = await dbPut(PARTS, `${job.key}:${c.index}`, blob);
+      // Sauvegardée : on relâche la mémoire, elle sera relue à la demande.
+      // Non sauvegardée (quota) : on la garde, sinon elle serait perdue.
+      c.blob = saved ? null : blob;
       await saveJobMeta();
       updatePartRow(c); refreshPartsTag();
       await yieldNow();
@@ -1158,8 +1316,8 @@ pauseBtn.addEventListener('click', () => {
 
 joinBtn.addEventListener('click', async () => {
   if (!job || running) return;
-  const parts = job.chunks.filter(c => c.status === 'done' && c.blob);
-  if (parts.length !== job.chunks.length) return;
+  const done = job.chunks.filter(c => c.status === 'done');
+  if (done.length !== job.chunks.length) return;
 
   running = true;
   joinBtn.disabled = true; processBtn.disabled = true;
@@ -1168,16 +1326,22 @@ joinBtn.addEventListener('click', async () => {
   setStatus('🧩 Réunion des parties (copie directe, sans réencodage)...');
   await keepAwake(true);
 
+  let blobs = null;
   try {
+    // Les parties ne sont relues qu'ici, au moment où elles servent vraiment.
+    blobs = [];
+    for (const c of done) blobs.push(await loadPartBlob(c));
+
     let blob;
     if (engine === 'turbo') {
-      try { blob = await turboJoin(parts.map(c => c.blob)); }
+      try { blob = await turboJoin(blobs); }
       catch (e) { log('⚠️ Réunion turbo impossible (' + e.message + '). Passage à ffmpeg.'); }
     }
     if (!blob) {
       const ff = await getFFmpeg();
-      blob = await joinParts(ff, parts);
+      blob = await joinParts(ff, done.map((c, i) => ({ index: c.index, blob: blobs[i] })));
     }
+    blobs = null;   // libère les parties source avant de garder le résultat
     paintProgress(1);
 
     if (finalURL) URL.revokeObjectURL(finalURL);
@@ -1201,4 +1365,5 @@ joinBtn.addEventListener('click', async () => {
 window.addEventListener('beforeunload', e => {
   if (running) { e.preventDefault(); e.returnValue = ''; }
   if (finalURL) URL.revokeObjectURL(finalURL);
+  releasePartUrls();
 });

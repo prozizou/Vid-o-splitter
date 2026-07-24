@@ -2,11 +2,12 @@
    AUDIO STUDIO — chaîne de mastering voix, 100 % locale.
 
    Chaîne : porte de bruit -> coupe-bas -> EQ 7 bandes -> compresseur
-            -> normalisation vers un volume cible (approx. LUFS via RMS-K).
+            -> normalisation vers une sonie cible + limiteur (loudness.js).
 
    - La porte de bruit est maison (enveloppe attaque/relâche, jamais de mute
      brutal) car DynamicsCompressorNode ne sait pas faire de gate.
    - EQ et compresseur : nœuds natifs Web Audio dans un OfflineAudioContext.
+   - Mesure de sonie et limiteur : loudness.js (BS.1770-4, module pur testé).
    - Pré-écoute : les 10 premières secondes passent dans la MÊME chaîne en
      temps réel (AudioContext), pour régler avant de traiter tout le fichier.
    ========================================================================== */
@@ -15,6 +16,7 @@ import {
   ui, wireDropZone, makeStatus, makeProgress, fmtSize,
   decodeFile, bufferToWav, isVideo, replaceAudioInVideo, wavToM4a,
 } from './media.js';
+import { normalizeTo } from './loudness.js';
 
 const els = ui(['dropZone','fileInput','preset','gateThr','gateVal','hp','eqBands',
   'comp','compVal','loud','loudVal','previewBtn','processBtn',
@@ -143,36 +145,6 @@ function buildChain(ctx, srcNode) {
   return node;
 }
 
-// ---------- Normalisation vers le volume cible ----------
-// Approximation LUFS : RMS avec pré-filtre coupe-bas déjà appliqué (courbe K
-// simplifiée). Suffisant pour viser -16/-14 à ±1 dB près.
-function normalize(buffer, targetLufs) {
-  const n = buffer.length, ch = buffer.numberOfChannels;
-  let sum = 0;
-  for (let c = 0; c < ch; c++) {
-    const d = buffer.getChannelData(c);
-    for (let i = 0; i < n; i += 4) sum += d[i] * d[i];   // sous-échantillonné x4
-  }
-  const rms = Math.sqrt(sum / (ch * Math.ceil(n / 4)));
-  const lufs = 20 * Math.log10(rms + 1e-12) - 0.7;
-  let gain = Math.pow(10, (targetLufs - lufs) / 20);
-
-  // Limiteur de crête : la vraie crête ne doit pas dépasser -1 dBFS.
-  let peak = 0;
-  for (let c = 0; c < ch; c++) {
-    const d = buffer.getChannelData(c);
-    for (let i = 0; i < n; i++) { const a = Math.abs(d[i]); if (a > peak) peak = a; }
-  }
-  const maxGain = 0.891 / (peak + 1e-9);   // -1 dBFS
-  if (gain > maxGain) gain = maxGain;
-
-  for (let c = 0; c < ch; c++) {
-    const d = buffer.getChannelData(c);
-    for (let i = 0; i < n; i++) d[i] *= gain;
-  }
-  return { applied: 20 * Math.log10(gain) };
-}
-
 // ---------- Traitement complet ----------
 els.processBtn.addEventListener('click', async () => {
   if (!decoded) return;
@@ -201,8 +173,16 @@ els.processBtn.addEventListener('click', async () => {
     progress.set(0.75);
 
     // 4. normalisation
-    const { applied } = normalize(rendered, P.loud);
-    log(`Normalisation : ${applied >= 0 ? '+' : ''}${applied.toFixed(1)} dB appliqués (cible ${P.loud} LUFS).`);
+    // getChannelData renvoie une vue directe : la normalisation agit sur place.
+    const outCh = Array.from({ length: rendered.numberOfChannels }, (_, c) => rendered.getChannelData(c));
+    const { applied, lufs, reduction } = normalizeTo(outCh, rendered.sampleRate, P.loud);
+    if (isFinite(lufs)) {
+      log(`Sonie mesurée : ${lufs.toFixed(1)} LUFS (pondération K, portes EBU R128).`);
+      log(`Normalisation : ${applied >= 0 ? '+' : ''}${applied.toFixed(1)} dB appliqués (cible ${P.loud} LUFS).`);
+      if (reduction < -0.1) log(`Limiteur : ${reduction.toFixed(1)} dB de réduction sur les crêtes.`);
+    } else {
+      log('Extrait trop court pour une mesure de sonie : normalisation ignorée.');
+    }
     progress.set(0.9);
 
     resultWav = bufferToWav(rendered);
