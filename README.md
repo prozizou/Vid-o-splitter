@@ -216,6 +216,32 @@ Le build echoue bruyamment si un fichier attendu manque dans `dist/`.
 - `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`,
   `Permissions-Policy` refusant camera, micro et geolocalisation.
 
+## Mises a jour et cache (important)
+
+La version du service worker est une **empreinte du contenu**, calculee par
+`build.sh` et injectee dans `sw.js`. Des qu'un seul fichier servi change,
+l'empreinte change, donc `sw.js` change, donc le navigateur voit une vraie mise
+a jour : `install` puis `activate` s'executent et l'ancien cache est purge.
+
+Ce numero etait auparavant ecrit a la main, et c'etait un piege : deux
+livraisons ont modifie six fichiers JS sans qu'il bouge. `sw.js` restant
+identique a l'octet pres, le navigateur ne declenchait **aucune** mise a jour,
+la purge n'avait jamais lieu, et les utilisateurs continuaient de recevoir
+l'ancien code depuis leur cache — sans le moindre signe.
+
+Deux garde-fous accompagnent ce mecanisme :
+
+- **Pastille de version** en bas de chaque page. Elle affiche la version
+  REELLEMENT chargee dans le navigateur, pas celle qui est en ligne. En cas de
+  doute (« ma correction est-elle deployee ? »), comparez-la au dernier build :
+  si elles different, c'est le cache local, pas le deploiement.
+- **Bandeau « Nouvelle version disponible »** au lieu d'un `skipWaiting()`
+  automatique. Prendre la main au milieu d'un traitement d'une heure
+  remplacerait les fichiers sous les pieds de l'onglet en cours : la mise a
+  jour n'est appliquee que lorsque l'utilisateur clique.
+
+Le build echoue si l'empreinte n'a pas ete substituee.
+
 ## Installer comme application (PWA)
 
 Une fois le site en ligne sur Vercel (HTTPS) :

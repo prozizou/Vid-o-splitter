@@ -350,3 +350,30 @@ textarea:focus-visible { outline: 2px solid #38bdf8; outline-offset: 2px; }
   display: flex; flex-wrap: wrap; gap: 0.4rem;
   margin: 0.75rem 0 0.35rem;
 }
+
+/* ==================== VERSION ET MISE À JOUR ==================== */
+/* Indique la version REELLEMENT chargee : un service worker peut servir un
+   code ancien sans que rien ne le signale. */
+.build-tag {
+  margin: 1.5rem auto 0.75rem;
+  text-align: center;
+  font-size: 0.7rem;
+  color: #64748b;
+  font-variant-numeric: tabular-nums;
+  user-select: all;              /* sélectionnable d'un geste pour la recopier */
+}
+
+.update-banner {
+  position: fixed;
+  left: 0.75rem; right: 0.75rem;
+  bottom: max(0.75rem, env(safe-area-inset-bottom));
+  z-index: 50;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem;
+  padding: 0.7rem 0.9rem;
+  background: #1e293b;
+  border: 1px solid #38bdf8;
+  border-radius: 0.7rem;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  font-size: 0.9rem;
+}
+.update-banner span { flex: 1 1 auto; }
