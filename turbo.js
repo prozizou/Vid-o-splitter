@@ -109,6 +109,35 @@ function audioDescription(mp4file, trackId, sampleRate, channels) {
 // Lit le fichier par tranches de 4 Mo et livre les échantillons dans l'ordre.
 // La lecture se met en pause dès que la file d'attente est pleine : la mémoire
 // ne dépasse jamais quelques dizaines de Mo, même sur un fichier de 2 Go.
+
+/**
+ * Copie d'un échantillon mp4box, AVEC ses octets.
+ *
+ * mp4box livre à `onSamples` les objets `trak.samples[i]` eux-mêmes, et
+ * `releaseUsedSamples()` fait `sample.data = null` sur ces mêmes objets. Comme
+ * on met les échantillons en file pour les consommer plus tard, en garder la
+ * référence revenait à ne recevoir que des `data: null` — et donc à faire
+ * échouer la construction du tout premier EncodedVideoChunk/EncodedAudioChunk :
+ *
+ *   Failed to construct 'EncodedAudioChunk': [...] The provided value is not
+ *   of type '(ArrayBuffer or ArrayBufferView)'
+ *
+ * Le moteur turbo basculait alors systématiquement sur ffmpeg, en silence.
+ * On prend donc un instantané des octets avant toute libération.
+ */
+export function snapshotSample(s) {
+  return {
+    number: s.number,
+    cts: s.cts,
+    dts: s.dts,
+    duration: s.duration,
+    timescale: s.timescale,
+    is_sync: s.is_sync,
+    size: s.size,
+    data: s.data ? s.data.slice() : null,
+  };
+}
+
 async function createSampleStream(file, MP4Box, wanted) {
   const mp4 = MP4Box.createFile();
   const queue = [];
@@ -119,7 +148,8 @@ async function createSampleStream(file, MP4Box, wanted) {
     mp4.onError = e => { failed = new Error('Fichier illisible : ' + e); rej(failed); };
   });
   mp4.onSamples = (id, _u, samples) => {
-    for (const s of samples) queue.push({ id, s });
+    // La copie DOIT précéder releaseUsedSamples : voir snapshotSample().
+    for (const s of samples) queue.push({ id, s: snapshotSample(s) });
     mp4.releaseUsedSamples(id, samples[samples.length - 1].number + 1);
     if (notify) { notify(); notify = null; }
   };
