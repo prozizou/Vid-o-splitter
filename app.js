@@ -5,7 +5,7 @@
 import { turboSupported, turboAnalyze, turboRenderAll, turboJoin, turboMerge } from './turbo.js';
 import { SFX_TYPES, makeBedWav } from './sfx.js';
 import { segmentsFromLoud, thresholdCurve, planChunks, loudFromPCM } from './silence.js';
-import { fmtSize, fmtTime, probeDuration } from './media.js';
+import { fmtSize, fmtTime, probeDuration, attachLogTools } from './media.js';
 
 // ==================== CONFIGURATION ====================
 const CONFIG = {
@@ -109,6 +109,12 @@ const yieldNow = () => new Promise(r => { _waiters.push(r); _chan.port2.postMess
 const clamp01 = x => Math.max(0, Math.min(1, x || 0));
 
 function setStatus(msg, cls = '') { statusDiv.className = cls; statusDiv.textContent = msg; }
+
+// Boutons « Copier / Enregistrer » au-dessus du journal. C'est presque toujours
+// lui qui explique un repli de moteur ou une lenteur, et le sélectionner à la
+// main sur téléphone est pénible.
+attachLogTools(logOutput, 'journal-splitter.txt');
+
 function log(msg) {
   logOutput.classList.remove('hidden');
   logOutput.textContent += msg + '\n';

@@ -12,13 +12,14 @@
      se ferme.
    ========================================================================== */
 
-import { ui, wireDropZone, makeStatus, isVideo } from './media.js';
+import { ui, wireDropZone, makeStatus, isVideo, attachLogTools } from './media.js';
 
 const els = ui(['dropZone','fileInput','lyricsText','loadLinesBtn','lrcInput','status',
   'syncBox','player','syncLines','tapBtn','backBtn','rewindBtn','restartBtn',
   'exportBox','dlLrc','dlSrt','logOutput']);
 
 const setStatus = makeStatus(els.status);
+attachLogTools(els.logOutput, 'journal-lyrics.txt');
 
 let file = null;
 let mediaURL = null;

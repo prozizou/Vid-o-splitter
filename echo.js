@@ -14,7 +14,7 @@
    ========================================================================== */
 
 import {
-  ui, wireDropZone, makeStatus, makeProgress, fmtSize,
+  ui, wireDropZone, makeStatus, makeProgress, fmtSize, attachLogTools,
   decodeFile, bufferToWav, channelsToBuffer, isVideo,
   replaceAudioInVideo, wavToM4a,
 } from './media.js';
@@ -27,6 +27,7 @@ const els = ui(['dropZone','fileInput','processBtn','status','progressContainer'
 const setStatus = makeStatus(els.status);
 const progress = makeProgress(els.progressContainer, els.progressBar);
 const log = m => { els.logOutput.classList.remove('hidden'); els.logOutput.textContent += m + '\n'; };
+attachLogTools(els.logOutput, 'journal-echo.txt');
 
 let file = null;
 let resultWav = null;
