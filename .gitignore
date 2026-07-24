@@ -1,0 +1,3 @@
+# Produit par build.sh (63 Mo de moteurs ffmpeg/mp4box telechargés au build)
+dist/
+node_modules/

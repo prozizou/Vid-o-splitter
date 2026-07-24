@@ -50,6 +50,31 @@ function loadMuxer() { return _muxer || (_muxer = import(MUXER_URL)); }
 const sleep = (ms = 0) => new Promise(r => setTimeout(r, ms));
 const usOf = (cts, timescale) => Math.round((cts / timescale) * US);
 
+/* Collecteur d'erreurs WebCodecs.
+   Les callbacks `error:` et `output:` des codecs sont appelés par le navigateur
+   dans leur propre tâche : une exception levée depuis là ne rejette PAS la
+   promesse que l'appelant attend, elle devient une exception non capturée. Le
+   repli automatique vers ffmpeg ne se déclenchait donc pas, et on produisait un
+   MP4 tronqué. On mémorise l'erreur ici, et la boucle la relève. */
+function errorSink() {
+  let first = null;
+  return {
+    fail(e, prefix) {
+      if (first) return;
+      const msg = (e && e.message) || String(e);
+      first = new Error(prefix ? `${prefix} : ${msg}` : msg);
+    },
+    check() { if (first) throw first; },
+    get raised() { return first !== null; },
+  };
+}
+
+/* Emballe un callback `output:` de codec pour que ses exceptions (typiquement
+   une erreur du muxer) soient collectées au lieu d'être perdues. */
+const guarded = (sink, prefix, fn) => (...args) => {
+  try { fn(...args); } catch (e) { sink.fail(e, prefix); }
+};
+
 // Récupère la « description » du codec (avcC / hvcC) exigée par VideoDecoder.
 function videoDescription(mp4file, trackId, MP4Box) {
   const trak = mp4file.getTrackById(trackId);
@@ -141,7 +166,7 @@ async function createSampleStream(file, MP4Box, wanted) {
 // Calcule directement l'enveloppe RMS : on ne stocke jamais le PCM entier.
 export async function turboAnalyze(file, windowSec, onProgress) {
   const MP4Box = await loadMP4Box();
-  const probe = MP4Box.createFile();
+  const sink = errorSink();
   // Passe 1 minimale : on a juste besoin de la piste audio.
   const stream = await createSampleStream(file, MP4Box, []);
   const aTrack = stream.info.audioTracks && stream.info.audioTracks[0];
@@ -158,7 +183,7 @@ export async function turboAnalyze(file, windowSec, onProgress) {
   let acc = 0, accN = 0;
 
   const dec = new AudioDecoder({
-    output: data => {
+    output: guarded(sink, 'Analyse audio', data => {
       const n = data.numberOfFrames;
       const buf = new Float32Array(n);
       const mix = new Float32Array(n);
@@ -171,8 +196,8 @@ export async function turboAnalyze(file, windowSec, onProgress) {
         acc += mix[i] * mix[i]; accN++;
         if (accN === win) { loud.push(Math.sqrt(acc / accN)); acc = 0; accN = 0; }
       }
-    },
-    error: e => { throw e; },
+    }),
+    error: e => sink.fail(e, 'Décodage audio'),
   });
   dec.configure({
     codec: aTrack.codec.startsWith('mp4a') ? 'mp4a.40.2' : aTrack.codec,
@@ -180,8 +205,9 @@ export async function turboAnalyze(file, windowSec, onProgress) {
     description: audioDescription(stream.mp4, aTrack.id, sr, ch) || undefined,
   });
 
-  let item;
+  let item, lastPaint = 0;
   while ((item = await stream.take())) {
+    sink.check();
     if (item.id !== aTrack.id) continue;
     const s = item.s;
     dec.decode(new EncodedAudioChunk({
@@ -189,12 +215,16 @@ export async function turboAnalyze(file, windowSec, onProgress) {
       duration: usOf(s.duration, s.timescale), data: s.data,
     }));
     if (dec.decodeQueueSize > 60) await sleep(2);
-    if (onProgress && loud.length) onProgress(Math.min(1, (loud.length * windowSec) / duration));
+    // La progression touche au DOM : inutile de la repeindre à chaque paquet.
+    if (onProgress && loud.length && performance.now() - lastPaint > 100) {
+      lastPaint = performance.now();
+      onProgress(Math.min(1, (loud.length * windowSec) / duration));
+    }
   }
   await dec.flush();
   dec.close();
+  sink.check();
   if (accN) loud.push(Math.sqrt(acc / accN));
-  void probe;
 
   return { loud: Float32Array.from(loud), winSec: win / sr, duration };
 }
@@ -282,6 +312,7 @@ async function pickVideoConfig(w, h, fps, crf) {
 export async function turboRenderAll(file, parts, opts, cb) {
   const MP4Box = await loadMP4Box();
   const { Muxer, ArrayBufferTarget } = await loadMuxer();
+  const sink = errorSink();
 
   const stream = await createSampleStream(file, MP4Box, []);
   const vT = stream.info.videoTracks && stream.info.videoTracks[0];
@@ -326,7 +357,7 @@ export async function turboRenderAll(file, parts, opts, cb) {
   let pending = [];           // trames décodées en attente de tri
   const vdec = new VideoDecoder({
     output: f => pending.push(f),
-    error: e => { throw new Error('Décodage vidéo : ' + e.message); },
+    error: e => sink.fail(e, 'Décodage vidéo'),
   });
   vdec.configure({ codec: vT.codec, codedWidth: W, codedHeight: H, description: vDesc,
                    hardwareAcceleration: 'prefer-hardware', optimizeForLatency: false });
@@ -336,7 +367,7 @@ export async function turboRenderAll(file, parts, opts, cb) {
   if (aT) {
     adec = new AudioDecoder({
       output: d => audioPending.push(d),
-      error: e => { throw new Error('Décodage audio : ' + e.message); },
+      error: e => sink.fail(e, 'Décodage audio'),
     });
     adec.configure({
       codec: aT.codec.startsWith('mp4a') ? 'mp4a.40.2' : aT.codec,
@@ -391,8 +422,8 @@ export async function turboRenderAll(file, parts, opts, cb) {
     });
 
     const venc = new VideoEncoder({
-      output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
-      error: e => { throw new Error('Encodage vidéo : ' + e.message); },
+      output: guarded(sink, 'Multiplexage vidéo', (chunk, meta) => muxer.addVideoChunk(chunk, meta)),
+      error: e => sink.fail(e, 'Encodage vidéo'),
     });
     venc.configure(encCfg);
 
@@ -426,21 +457,32 @@ export async function turboRenderAll(file, parts, opts, cb) {
 
     // Morceaux audio conservés, un tableau par canal
     const pieces = aT ? Array.from({ length: aCH }, () => []) : null;
+    // Tampon réutilisé : sans lui on allouait un Float32Array par canal ET par
+    // segment chevauchant, dans la boucle audio la plus chaude du moteur.
+    const scratch = [];
     const grabAudio = data => {
       const ts = data.timestamp, n = data.numberOfFrames;
       const end = ts + Math.round((n / aSR) * US);
+
+      // Ce paquet touche-t-il un segment conservé ? Sinon, aucune copie.
+      let touches = false;
+      for (const m of map) { if (m.s < end && m.e > ts) { touches = true; break; } }
+      if (!touches) { data.close(); return; }
+
+      // Une seule extraction par canal, quel que soit le nombre de segments couverts.
+      for (let c = 0; c < aCH; c++) {
+        if (!scratch[c] || scratch[c].length < n) scratch[c] = new Float32Array(n);
+        data.copyTo(scratch[c].subarray(0, n), {
+          planeIndex: Math.min(c, data.numberOfChannels - 1), format: 'f32-planar',
+        });
+      }
       for (const m of map) {
         const s = Math.max(ts, m.s), e = Math.min(end, m.e);
         if (e <= s) continue;
         const from = Math.round(((s - ts) / US) * aSR);
-        const to = Math.round(((e - ts) / US) * aSR);
-        const count = to - from;
-        if (count <= 0) continue;
-        for (let c = 0; c < aCH; c++) {
-          const tmp = new Float32Array(n);
-          data.copyTo(tmp, { planeIndex: Math.min(c, data.numberOfChannels - 1), format: 'f32-planar' });
-          pieces[c].push(tmp.subarray(from, to).slice());
-        }
+        const to = Math.min(n, Math.round(((e - ts) / US) * aSR));
+        if (to <= from) continue;
+        for (let c = 0; c < aCH; c++) pieces[c].push(scratch[c].slice(from, to));
       }
       data.close();
     };
@@ -449,6 +491,7 @@ export async function turboRenderAll(file, parts, opts, cb) {
     const endUs = Math.round(part.t1 * US);
     let item;
     while ((item = await stream.peek())) {
+      sink.check();                                  // erreur d'un codec ou du muxer
       const s = item.s;
       const ts = usOf(s.cts, s.timescale);
       if (ts >= endUs && item.id === vT.id) break;   // la partie suivante commence
@@ -479,6 +522,7 @@ export async function turboRenderAll(file, parts, opts, cb) {
     while (pending.length) emit(pending.shift());
     while (audioPending.length) grabAudio(audioPending.shift());
     await venc.flush();
+    sink.check();
 
     // --- Audio : fondus, égaliseur, encodage -----------------------
     if (aT && pieces[0].length) {
@@ -504,8 +548,8 @@ export async function turboRenderAll(file, parts, opts, cb) {
       }
 
       const aenc = new AudioEncoder({
-        output: (chunk, meta) => muxer.addAudioChunk(chunk, meta),
-        error: e => { throw new Error('Encodage audio : ' + e.message); },
+        output: guarded(sink, 'Multiplexage audio', (chunk, meta) => muxer.addAudioChunk(chunk, meta)),
+        error: e => sink.fail(e, 'Encodage audio'),
       });
       aenc.configure({ codec: 'mp4a.40.2', sampleRate: aSR, numberOfChannels: aCH, bitrate: 128_000 });
 
@@ -522,10 +566,12 @@ export async function turboRenderAll(file, parts, opts, cb) {
       }
       await aenc.flush();
       aenc.close();
+      sink.check();
     }
 
     venc.close();
     muxer.finalize();
+    sink.check();       // ne jamais livrer un MP4 tronqué comme s'il était bon
     const blob = new Blob([target.buffer], { type: 'video/mp4' });
 
     processedSec += partDurUs / US;
@@ -586,7 +632,12 @@ export async function turboJoin(blobs) {
         aEnd = Math.max(aEnd, aOffset + ts + dur);
       }
     }
-    vOffset = vEnd; aOffset = aEnd;
+    // UN SEUL point de départ pour la partie suivante, commun aux deux pistes.
+    // Les faire avancer séparément (vOffset = vEnd ; aOffset = aEnd) décalait
+    // l'audio de l'image d'un peu moins d'une trame AAC (~21 ms) à CHAQUE
+    // couture, et ces écarts s'additionnaient : ~250 ms de désynchronisation en
+    // fin de film sur une douzaine de parties.
+    vOffset = aOffset = Math.max(vEnd, aEnd);
   }
 
   muxer.finalize();
@@ -679,7 +730,8 @@ export async function turboMerge(files, onProgress) {
         aEnd = Math.max(aEnd, aOffset + ts + dur);
       }
     }
-    vOffset = vEnd; aOffset = aEnd;
+    // Origine commune aux deux pistes : voir le commentaire de turboJoin.
+    vOffset = aOffset = Math.max(vEnd, aEnd);
     if (onProgress) onProgress((fi + 1) / files.length);
   }
 

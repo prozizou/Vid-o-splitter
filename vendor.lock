@@ -1,0 +1,26 @@
+# Verrou des dépendances téléchargées au build (build.sh).
+#
+# Format : <paquet npm> <version> <integrity sha512 telle que publiee par npm>
+#
+# Rien n'est installé via npm : build.sh télécharge ces tarballs et copie
+# quelques fichiers dans dist/vendor/. Ce verrou remplace l'ancien « latest »,
+# qui rendait chaque déploiement non reproductible — un changement en amont
+# pouvait casser la production sans qu'un seul commit n'ait bougé ici.
+#
+# Pour mettre à jour une version : changer la ligne, récupérer la nouvelle
+# empreinte avec
+#   curl -fsSL https://registry.npmjs.org/<paquet>/<version> | grep -o '"integrity":"[^"]*"'
+# puis TESTER le moteur turbo sur un vrai fichier avant de pousser.
+#
+# Note sur mp4box : la 2.x ne livre plus le bundle UMD « mp4box.all.js »
+# (uniquement .mjs/.cjs). L'ancien build demandait « latest », échouait donc
+# systématiquement sur cette version et retombait en silence sur la 0.5.2.
+# C'est cette 0.5.2 qui tourne réellement en production : elle est désormais
+# épinglée explicitement.
+
+@ffmpeg/ffmpeg  0.12.10  sha512-lVtk8PW8e+NUzGZhPTWj2P1J4/NyuCrbDD3O9IGpSeLYtUZKBqZO8CNj1WYGghep/MXoM8e1qVY1GztTkf8YYQ==
+@ffmpeg/util    0.12.1   sha512-10jjfAKWaDyb8+nAkijcsi9wgz/y26LOc1NKJradNMyCIl6usQcBbhkjX5qhALrSBcOy6TOeksunTYa+a03qNQ==
+@ffmpeg/core    0.12.6   sha512-PrjWBTfGn2WVn9T7wGnzfFwChbqWeZc7tM9vvJZVRadYFUDakfzy7W0LpYC0cvvK0xT82qlBsk38lQhJ/Hps5A==
+@ffmpeg/core-mt 0.12.6   sha512-f7wrOeUk24VFRi2Gfsp/mwwkK1hbDV0ajgm2fOU/oRi+IDullyzAYdHOagAWfpSZXcTPAGZ1Ild7HmBwr3k2tg==
+mp4box          0.5.2    sha512-zRmGlvxy+YdW3Dmt+TR4xPHynbxwXtAQDTN/Fo9N3LMxaUlB2C5KmZpzYyGKy4c7k4Jf3RCR0A2pm9SZELOLXw==
+mp4-muxer       5.2.2    sha512-dhozjTywI0h2qFzeShagt8YYw811fh1XlwiDCE2f6Aeqf6xG2CyuShoSa5E0AZDO8pPF0JOZ3wOmWBNWIGdSpQ==

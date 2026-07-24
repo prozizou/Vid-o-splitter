@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  test:
+    name: Tests unitaires
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # Aucune dépendance à installer : les tests utilisent le lanceur intégré
+      # de Node (`node --test`), comme le reste du projet n'utilise aucun paquet.
+      - name: Tests
+        run: npm test
+
+  build:
+    name: Build (vendor épinglé)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Vérifie que build.sh aboutit ET que les empreintes de vendor.lock
+      # correspondent toujours. C'est ce qui empêche un changement en amont de
+      # casser la production sans qu'aucun commit n'ait bougé ici.
+      - name: Build
+        run: bash build.sh
+      - name: Contenu produit
+        run: du -sh dist && find dist -maxdepth 2 -type f | sort

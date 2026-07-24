@@ -33,7 +33,7 @@
     </label>
   </div>
 
-  <div id="status"></div>
+  <div id="status" role="status" aria-live="polite" aria-atomic="true"></div>
 
   <section class="sync hidden" id="syncBox">
     <audio id="player" controls preload="metadata"></audio>
@@ -53,11 +53,9 @@
     <button class="btn btn-ghost" id="dlSrt">⬇️ Exporter .srt (sous-titres vidéo)</button>
   </div>
 
-  <div class="log hidden" id="logOutput"></div>
+  <div class="log hidden" id="logOutput" role="log" aria-label="Journal technique"></div>
 </div>
 <script type="module" src="lyrics.js"></script>
-<script>
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});
-</script>
+<script src="/sw-register.js" defer></script>
 </body>
 </html>

@@ -26,7 +26,7 @@
   <p class="subtitle">Quatre outils, zéro envoi en ligne : tout se passe sur votre appareil.</p>
 
   <nav class="menu">
-    <a class="menu-card" href="/splitter.html">
+    <a class="menu-card" href="/splitter">
       <span class="menu-icon">🪓</span>
       <span class="menu-body">
         <b>Splitter</b>
@@ -35,7 +35,7 @@
       <span class="menu-go">›</span>
     </a>
 
-    <a class="menu-card" href="/echo.html">
+    <a class="menu-card" href="/echo">
       <span class="menu-icon">🔇</span>
       <span class="menu-body">
         <b>Echo Remover</b>
@@ -44,7 +44,7 @@
       <span class="menu-go">›</span>
     </a>
 
-    <a class="menu-card" href="/studio.html">
+    <a class="menu-card" href="/studio">
       <span class="menu-icon">🎚️</span>
       <span class="menu-body">
         <b>Audio Studio</b>
@@ -53,7 +53,7 @@
       <span class="menu-go">›</span>
     </a>
 
-    <a class="menu-card" href="/lyrics.html">
+    <a class="menu-card" href="/lyrics">
       <span class="menu-icon">🎤</span>
       <span class="menu-body">
         <b>Lyrics</b>
@@ -66,13 +66,6 @@
   <p class="foot">Fonctionne hors-ligne une fois installée. Vos fichiers ne quittent jamais l'appareil.</p>
 </div>
 
-<script>
-  if ('serviceWorker' in navigator) {
-    window.addEventListener('load', () => {
-      navigator.serviceWorker.register('/sw.js').catch(err =>
-        console.warn('SW non enregistré :', err));
-    });
-  }
-</script>
+<script src="/sw-register.js" defer></script>
 </body>
 </html>

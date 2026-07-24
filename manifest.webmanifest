@@ -8,21 +8,64 @@
   "start_url": "/?source=pwa",
   "scope": "/",
   "display": "standalone",
-  "display_override": ["standalone", "minimal-ui"],
+  "display_override": [
+    "standalone",
+    "minimal-ui"
+  ],
   "orientation": "portrait",
   "background_color": "#0f172a",
   "theme_color": "#0f172a",
-  "categories": ["utilities", "multimedia", "productivity"],
+  "categories": [
+    "utilities",
+    "multimedia",
+    "productivity"
+  ],
   "shortcuts": [
-    { "name": "Splitter", "url": "/splitter.html", "description": "Supprimer les silences d'une vidéo" },
-    { "name": "Echo Remover", "url": "/echo.html", "description": "Réduire l'écho d'une voix" },
-    { "name": "Audio Studio", "url": "/studio.html", "description": "Nettoyer et masteriser une piste voix" },
-    { "name": "Lyrics", "url": "/lyrics.html", "description": "Synchroniser des paroles" }
+    {
+      "name": "Splitter",
+      "url": "/splitter",
+      "description": "Supprimer les silences d'une vidéo"
+    },
+    {
+      "name": "Echo Remover",
+      "url": "/echo",
+      "description": "Réduire l'écho d'une voix"
+    },
+    {
+      "name": "Audio Studio",
+      "url": "/studio",
+      "description": "Nettoyer et masteriser une piste voix"
+    },
+    {
+      "name": "Lyrics",
+      "url": "/lyrics",
+      "description": "Synchroniser des paroles"
+    }
   ],
   "icons": [
-    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
-    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
-    { "src": "/icons/icon-maskable-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
-    { "src": "/icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-maskable-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/icons/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
   ]
 }
