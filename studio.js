@@ -13,7 +13,7 @@
    ========================================================================== */
 
 import {
-  ui, wireDropZone, makeStatus, makeProgress, fmtSize,
+  ui, wireDropZone, makeStatus, makeProgress, fmtSize, attachLogTools,
   decodeFile, bufferToWav, isVideo, replaceAudioInVideo, wavToM4a,
 } from './media.js';
 import { normalizeTo } from './loudness.js';
@@ -26,6 +26,7 @@ const els = ui(['dropZone','fileInput','preset','gateThr','gateVal','hp','eqBand
 const setStatus = makeStatus(els.status);
 const progress = makeProgress(els.progressContainer, els.progressBar);
 const log = m => { els.logOutput.classList.remove('hidden'); els.logOutput.textContent += m + '\n'; };
+attachLogTools(els.logOutput, 'journal-studio.txt');
 
 let file = null, decoded = null, resultWav = null;
 let urls = [];

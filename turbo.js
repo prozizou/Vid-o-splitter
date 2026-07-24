@@ -75,13 +75,38 @@ const guarded = (sink, prefix, fn) => (...args) => {
   try { fn(...args); } catch (e) { sink.fail(e, prefix); }
 };
 
+/**
+ * Localise la classe DataStream de mp4box.
+ *
+ * Le bundle `mp4box.all.js` expose DEUX globaux distincts : `MP4Box`, qui ne
+ * contient que `createFile`, et `DataStream`, à côté. Chercher
+ * `MP4Box.DataStream` donnait donc `undefined`, et lire `.BIG_ENDIAN` dessus
+ * levait « Cannot read properties of undefined » — ce qui interrompait le
+ * moteur turbo au moment du rendu et le faisait retomber sur ffmpeg.
+ *
+ * On accepte les deux emplacements : si une version future de mp4box range
+ * DataStream sous MP4Box, ça continuera de fonctionner.
+ */
+export function resolveDataStream(MP4Box, scope) {
+  const g = scope || (typeof self !== 'undefined' ? self : globalThis);
+  const DS = (MP4Box && MP4Box.DataStream) || (g && g.DataStream);
+  if (typeof DS !== 'function') {
+    throw new Error('mp4box : classe DataStream introuvable (bundle incomplet ?)');
+  }
+  return DS;
+}
+
 // Récupère la « description » du codec (avcC / hvcC) exigée par VideoDecoder.
 function videoDescription(mp4file, trackId, MP4Box) {
   const trak = mp4file.getTrackById(trackId);
   for (const entry of trak.mdia.minf.stbl.stsd.entries) {
     const box = entry.avcC || entry.hvcC || entry.vpcC || entry.av1C;
     if (!box) continue;
-    const stream = new MP4Box.DataStream(undefined, 0, MP4Box.DataStream.BIG_ENDIAN);
+    const DataStream = resolveDataStream(MP4Box);
+    // BIG_ENDIAN vaut `false` chez mp4box (l'endianness y est un booléen où
+    // `true` signifie petit-boutiste) : il faut donc bien passer la constante,
+    // pas une valeur « vraie ».
+    const stream = new DataStream(undefined, 0, DataStream.BIG_ENDIAN);
     box.write(stream);
     return new Uint8Array(stream.buffer, 8); // on saute l'en-tête de boîte
   }

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { snapshotSample } from '../turbo.js';
+import { snapshotSample, resolveDataStream } from '../turbo.js';
 
 /**
  * Régression : le moteur turbo n'a jamais pu démarrer parce que les
@@ -74,4 +74,45 @@ test('un échantillon sans données ne fait pas planter la copie', () => {
 test('is_sync est preservé : il pilote le marquage des images clés', () => {
   assert.equal(snapshotSample({ ...fakeSample(0), is_sync: true }).is_sync, true);
   assert.equal(snapshotSample({ ...fakeSample(5), is_sync: false }).is_sync, false);
+});
+
+/**
+ * Régression : `MP4Box` n'expose que `createFile`. La classe `DataStream` est
+ * un global SÉPARÉ posé par le même bundle. Chercher `MP4Box.DataStream`
+ * donnait `undefined`, et lire `.BIG_ENDIAN` dessus levait
+ * « Cannot read properties of undefined (reading 'BIG_ENDIAN') », ce qui
+ * interrompait le moteur turbo au rendu et le faisait retomber sur ffmpeg.
+ */
+test('DataStream est trouvé quand il est un global séparé', () => {
+  const MP4Box = { createFile: () => ({}) };          // ce que mp4box expose vraiment
+  function DataStream() {}
+  DataStream.BIG_ENDIAN = false;
+  const scope = { DataStream };
+  assert.equal(resolveDataStream(MP4Box, scope), DataStream);
+});
+
+test('DataStream est trouvé s\'il est rangé sous MP4Box', () => {
+  // Compatibilité ascendante si une version future le déplace.
+  function DataStream() {}
+  const MP4Box = { createFile: () => ({}), DataStream };
+  assert.equal(resolveDataStream(MP4Box, {}), DataStream);
+});
+
+test('une absence totale de DataStream donne une erreur explicite', () => {
+  assert.throws(
+    () => resolveDataStream({ createFile: () => ({}) }, {}),
+    /DataStream introuvable/,
+    'le message doit nommer le problème, pas « undefined »',
+  );
+});
+
+test('BIG_ENDIAN vaut false chez mp4box et doit être transmis tel quel', () => {
+  // L'endianness y est un booléen où `true` = petit-boutiste. Remplacer la
+  // constante par une valeur « vraie » inverserait l'ordre des octets de l'avcC.
+  function DataStream() {}
+  DataStream.BIG_ENDIAN = false;
+  DataStream.LITTLE_ENDIAN = true;
+  const DS = resolveDataStream(null, { DataStream });
+  assert.equal(DS.BIG_ENDIAN, false);
+  assert.notEqual(DS.BIG_ENDIAN, DS.LITTLE_ENDIAN);
 });
