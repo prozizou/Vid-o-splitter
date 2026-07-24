@@ -20,7 +20,14 @@
       stale-while-revalidate : réponse immédiate depuis le cache, et mise à
       jour en arrière-plan pour la visite suivante.
 */
-const VERSION = 'v8';
+// Empreinte du contenu, injectée par build.sh. Elle change des qu'UN SEUL
+// fichier du shell change — donc sw.js change aussi, donc le navigateur voit
+// une vraie mise a jour, donc `activate` s'execute et purge l'ancien cache.
+//
+// Avant, ce numero etait ecrit a la main : deux livraisons ont modifie six
+// fichiers JS sans qu'il bouge. sw.js restant identique a l'octet pres, le
+// navigateur ne declenchait aucune mise a jour et la purge n'avait jamais lieu.
+const VERSION = '__BUILD_VERSION__';
 const SHELL_CACHE  = `shell-${VERSION}`;
 const VENDOR_CACHE = `vendor-${VERSION}`;
 
@@ -61,8 +68,15 @@ self.addEventListener('install', event => {
         if (res.ok) await cache.put(url, res);
       } catch { /* réessayé à la volée lors de la première visite */ }
     }));
-    await self.skipWaiting();
+    // PAS de skipWaiting() ici : prendre la main au milieu d'un traitement long
+    // remplacerait les fichiers sous les pieds de l'onglet en cours. On attend
+    // que l'utilisateur clique « Recharger » dans le bandeau (sw-register.js).
   })());
+});
+
+// Déclenché par le bandeau de mise à jour.
+self.addEventListener('message', event => {
+  if (event.data && event.data.type === 'SKIP_WAITING') self.skipWaiting();
 });
 
 self.addEventListener('activate', event => {

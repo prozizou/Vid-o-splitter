@@ -96,6 +96,27 @@ fetch_file "mp4box"    "mp4box.all.js"  "dist/vendor/mp4box"
 fetch_file "mp4-muxer" "mp4-muxer.mjs"  "dist/vendor/mp4-muxer"
 
 # ---------------------------------------------------------------------------
+# Version du service worker = empreinte du contenu du shell.
+#
+# Elle etait ecrite a la main, et deux livraisons ont modifie six fichiers JS
+# sans qu'elle bouge. sw.js restant identique a l'octet pres, le navigateur ne
+# voyait aucune mise a jour : ni `install`, ni `activate`, donc jamais de purge,
+# et les utilisateurs continuaient de recevoir l'ancien code depuis leur cache.
+#
+# Desormais tout changement d'un fichier servi change l'empreinte, donc sw.js,
+# donc le navigateur declenche une vraie mise a jour. Plus rien a penser.
+# ---------------------------------------------------------------------------
+echo "▶ Empreinte de version"
+# sw.js et sw-register.js sont exclus : ils CONTIENNENT l'empreinte.
+BUILD_VERSION="$(
+  find dist -maxdepth 1 -type f \( -name '*.js' -o -name '*.css' -o -name '*.html' -o -name '*.webmanifest' \) \
+    ! -name 'sw.js' ! -name 'sw-register.js' \
+    | sort | xargs cat | sha256sum | cut -c1-12
+)"
+sed -i "s/__BUILD_VERSION__/${BUILD_VERSION}/g" dist/sw.js dist/sw-register.js
+echo "  version : ${BUILD_VERSION}"
+
+# ---------------------------------------------------------------------------
 # Garde-fou : le build doit échouer BRUYAMMENT plutôt que livrer une app
 # amputée d'un de ses deux moteurs.
 # ---------------------------------------------------------------------------
@@ -120,6 +141,13 @@ for f in "${REQUIRED[@]}"; do
   [ -f "$f" ] || { echo "  ✖ manquant : $f"; missing=1; }
 done
 [ "$missing" -eq 0 ] || { echo "✖ Build incomplet."; exit 1; }
+
+# Un placeholder non substitue signifierait un service worker qui ne se met
+# plus jamais a jour : c'est exactement le defaut qu'on vient de corriger.
+if grep -q '__BUILD_VERSION__' dist/sw.js dist/sw-register.js; then
+  echo "  ✖ __BUILD_VERSION__ n'a pas été substitué."
+  exit 1
+fi
 
 find dist/vendor -maxdepth 2 -type f | sort
 echo "✅ Build terminé."
