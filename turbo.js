@@ -54,6 +54,15 @@ const usOf = (cts, timescale) => Math.round((cts / timescale) * US);
 // doit se declencher que sur un vrai blocage, jamais sur un appareil lent.
 const FLUSH_TIMEOUT_MS = 90_000;
 
+// Nombre de trames tolerees en vol dans le pipeline.
+//
+// Volontairement bas : une trame remise a l'encodeur retient le tampon de
+// sortie du decodeur jusqu'a ce qu'elle soit consommee, et le pool de tampons
+// d'un decodeur materiel de telephone est petit (souvent 8 a 16). Trop de
+// trames retenues affame le decodeur, qui abandonne avec un laconique
+// « Decoding error ».
+const IN_FLIGHT_MAX = 6;
+
 /** Rejette si la promesse n'aboutit pas a temps, au lieu d'attendre sans fin. */
 export function withTimeout(promise, ms, message) {
   let t;
@@ -398,12 +407,12 @@ function bitrateFor(w, h, fps, crf) {
   return Math.max(400_000, Math.round(w * h * fps * bpp));
 }
 
-async function pickVideoConfig(w, h, fps, crf) {
+async function pickVideoConfig(w, h, fps, crf, accel = 'prefer-hardware') {
   const base = {
     width: w, height: h, framerate: fps,
     bitrate: bitrateFor(w, h, fps, crf),
     avc: { format: 'avc' },
-    hardwareAcceleration: 'prefer-hardware',
+    hardwareAcceleration: accel,
   };
   for (const codec of CODEC_CANDIDATES) {
     try {
@@ -429,7 +438,34 @@ async function pickVideoConfig(w, h, fps, crf) {
  * @param opts   { crf, eq, audioFadeSec, videoFadeSec, sfx: {type, gainDb} }
  * @param cb     { onPartStart, onPartDone, onProgress, shouldStop }
  */
+/**
+ * Rend toutes les parties, avec repli du MATERIEL vers le LOGICIEL.
+ *
+ * Les codecs materiels des telephones echouent parfois sur un flux qu'ils
+ * jugent hors de leurs capacites, avec un laconique « Decoding error ». Plutot
+ * que de retomber aussitot sur ffmpeg.wasm (~0,2x temps reel), on retente avec
+ * les codecs LOGICIELS du navigateur : ils restent bien plus rapides que
+ * x264 compile en WebAssembly.
+ *
+ * Le second essai relit le fichier depuis le debut et saute les parties deja
+ * produites, donc rien n'est refait inutilement.
+ */
 export async function turboRenderAll(file, parts, opts, cb) {
+  try {
+    return await renderAllOnce(file, parts, opts, cb, 'prefer-hardware');
+  } catch (e) {
+    const dejaFait = parts.some(p => p.status === 'done');
+    const codec = /decod|encod/i.test(e.message || '');
+    if (dejaFait || !codec) throw e;   // rien a gagner a tout recommencer
+    if (cb.onLog) {
+      cb.onLog(`⚠️ Codec matériel en échec (${e.message}).`);
+      cb.onLog('↩️ Nouvel essai avec les codecs logiciels du navigateur.');
+    }
+    return await renderAllOnce(file, parts, opts, cb, 'no-preference');
+  }
+}
+
+async function renderAllOnce(file, parts, opts, cb, accel) {
   const MP4Box = await loadMP4Box();
   const { Muxer, ArrayBufferTarget } = await loadMuxer();
   const sink = errorSink();
@@ -449,7 +485,7 @@ export async function turboRenderAll(file, parts, opts, cb) {
 
   const vDesc = videoDescription(stream.mp4, vT.id, MP4Box);
   if (!vDesc) throw new Error("Codec vidéo non pris en charge par le moteur turbo.");
-  const encCfg = await pickVideoConfig(W, H, fps, opts.crf);
+  const encCfg = await pickVideoConfig(W, H, fps, opts.crf, accel);
 
   const aSR = aT ? aT.audio.sample_rate : 0;
   const aCH = aT ? Math.min(2, aT.audio.channel_count) : 0;
@@ -510,7 +546,7 @@ export async function turboRenderAll(file, parts, opts, cb) {
     error: e => sink.fail(e, 'Décodage vidéo'),
   });
   vdec.configure({ codec: vT.codec, codedWidth: W, codedHeight: H, description: vDesc,
-                   hardwareAcceleration: 'prefer-hardware', optimizeForLatency: false });
+                   hardwareAcceleration: accel, optimizeForLatency: false });
 
   let adec = null;
   if (aT) {
@@ -743,7 +779,7 @@ export async function turboRenderAll(file, parts, opts, cb) {
       // grossissait sans limite jusqu'au blocage. Ici on ATTEND que les files
       // redescendent, ce qui borne reellement la memoire en vol — et laisse
       // peu de travail au flush final, la ou aucun freinage n'est possible.
-      while (vdec.decodeQueueSize > 16 || venc.encodeQueueSize > 16) {
+      while (vdec.decodeQueueSize > IN_FLIGHT_MAX || venc.encodeQueueSize > IN_FLIGHT_MAX) {
         sink.check();
         await sleep(8);
       }
