@@ -496,8 +496,17 @@ export async function turboRenderAll(file, parts, opts, cb) {
   // suivantes echouent sur « A key frame is required after flush() ».
   const primer = createGopPrimer();
 
+  // Les callbacks des DECODEURS doivent etre proteges au meme titre que ceux
+  // des encodeurs : depuis qu'ils appellent directement emit()/grabAudio(),
+  // une exception levee la (une conversion copyTo refusee, par exemple) partait
+  // dans une tache du navigateur et DISPARAISSAIT. Consequences observees : des
+  // parties rendues sans aucun son, et des AudioData jamais fermees — donc une
+  // pression memoire qui finissait par bloquer le decodeur.
   const vdec = new VideoDecoder({
-    output: f => { if (emitFrame) emitFrame(f); else f.close(); },
+    output: f => {
+      try { if (emitFrame) emitFrame(f); else f.close(); }
+      catch (e) { sink.fail(e, 'Traitement vidéo'); try { f.close(); } catch {} }
+    },
     error: e => sink.fail(e, 'Décodage vidéo'),
   });
   vdec.configure({ codec: vT.codec, codedWidth: W, codedHeight: H, description: vDesc,
@@ -506,7 +515,10 @@ export async function turboRenderAll(file, parts, opts, cb) {
   let adec = null;
   if (aT) {
     adec = new AudioDecoder({
-      output: d => { if (takeAudio) takeAudio(d); else d.close(); },
+      output: d => {
+        try { if (takeAudio) takeAudio(d); else d.close(); }
+        catch (e) { sink.fail(e, 'Traitement audio'); try { d.close(); } catch {} }
+      },
       error: e => sink.fail(e, 'Décodage audio'),
     });
     adec.configure({
@@ -586,7 +598,7 @@ export async function turboRenderAll(file, parts, opts, cb) {
     // fin de chaque partie : sur un fichier rendu en une seule partie, la barre
     // restait figee sur la valeur laissee par l'analyse, du debut a la fin. On
     // ne pouvait pas distinguer « ca travaille » de « c'est bloque ».
-    let emittedUs = 0, lastReport = 0;
+    let emittedUs = 0, lastReport = 0, framesOut = 0;
     const emit = frame => {
       const m = inRange(frame.timestamp);
       if (!m) { frame.close(); return; }
@@ -619,38 +631,77 @@ export async function turboRenderAll(file, parts, opts, cb) {
       firstFrame = false;
       venc.encode(out, { keyFrame: key });
       out.close();
+      framesOut++;
     };
 
     // Morceaux audio conservés, un tableau par canal
     const pieces = aT ? Array.from({ length: aCH }, () => []) : null;
-    // Tampon réutilisé : sans lui on allouait un Float32Array par canal ET par
-    // segment chevauchant, dans la boucle audio la plus chaude du moteur.
+    // Tampons réutilisés : sans eux on allouait un Float32Array par canal ET
+    // par segment chevauchant, dans la boucle audio la plus chaude du moteur.
     const scratch = [];
-    const grabAudio = data => {
-      const ts = data.timestamp, n = data.numberOfFrames;
-      const end = ts + Math.round((n / aSR) * US);
+    let interleaved = null;
+    let audioSamples = 0;
+    let planarRefused = false;   // le navigateur refuse la conversion planaire
 
-      // Ce paquet touche-t-il un segment conservé ? Sinon, aucune copie.
-      let touches = false;
-      for (const m of map) { if (m.s < end && m.e > ts) { touches = true; break; } }
-      if (!touches) { data.close(); return; }
-
-      // Une seule extraction par canal, quel que soit le nombre de segments couverts.
+    /**
+     * Extrait les canaux d'un AudioData dans `scratch`, en float 32 planaire.
+     *
+     * Tous les navigateurs n'acceptent pas que `copyTo` CONVERTISSE vers
+     * 'f32-planar' quand la sortie du décodeur est entrelacée. Le repli
+     * récupère l'entrelacé et désentrelace ici. Sans lui, l'exception partait
+     * dans une tâche du navigateur, invisible : la partie sortait sans aucun
+     * son, et les AudioData n'étaient jamais fermées.
+     */
+    const extractChannels = data => {
+      const n = data.numberOfFrames;
+      const nCh = data.numberOfChannels;
       for (let c = 0; c < aCH; c++) {
         if (!scratch[c] || scratch[c].length < n) scratch[c] = new Float32Array(n);
-        data.copyTo(scratch[c].subarray(0, n), {
-          planeIndex: Math.min(c, data.numberOfChannels - 1), format: 'f32-planar',
-        });
       }
-      for (const m of map) {
-        const s = Math.max(ts, m.s), e = Math.min(end, m.e);
-        if (e <= s) continue;
-        const from = Math.round(((s - ts) / US) * aSR);
-        const to = Math.min(n, Math.round(((e - ts) / US) * aSR));
-        if (to <= from) continue;
-        for (let c = 0; c < aCH; c++) pieces[c].push(scratch[c].slice(from, to));
+      if (!planarRefused) {
+        try {
+          for (let c = 0; c < aCH; c++) {
+            data.copyTo(scratch[c].subarray(0, n), {
+              planeIndex: Math.min(c, nCh - 1), format: 'f32-planar',
+            });
+          }
+          return;
+        } catch { planarRefused = true; }   // on ne réessaiera plus
       }
-      data.close();
+      const total = n * nCh;
+      if (!interleaved || interleaved.length < total) interleaved = new Float32Array(total);
+      data.copyTo(interleaved.subarray(0, total), { planeIndex: 0, format: 'f32' });
+      for (let c = 0; c < aCH; c++) {
+        const src = Math.min(c, nCh - 1), dst = scratch[c];
+        for (let i = 0; i < n; i++) dst[i] = interleaved[i * nCh + src];
+      }
+    };
+
+    const grabAudio = data => {
+      try {
+        const ts = data.timestamp, n = data.numberOfFrames;
+        const end = ts + Math.round((n / aSR) * US);
+
+        // Ce paquet touche-t-il un segment conservé ? Sinon, aucune copie.
+        let touches = false;
+        for (const m of map) { if (m.s < end && m.e > ts) { touches = true; break; } }
+        if (!touches) return;
+
+        extractChannels(data);
+
+        for (const m of map) {
+          const s = Math.max(ts, m.s), e = Math.min(end, m.e);
+          if (e <= s) continue;
+          const from = Math.round(((s - ts) / US) * aSR);
+          const to = Math.min(n, Math.round(((e - ts) / US) * aSR));
+          if (to <= from) continue;
+          for (let c = 0; c < aCH; c++) pieces[c].push(scratch[c].slice(from, to));
+          audioSamples += to - from;
+        }
+      } finally {
+        // Fermeture garantie : une AudioData non fermee retient de la memoire.
+        data.close();
+      }
     };
 
     // --- Alimentation des décodeurs jusqu'à la fin de la partie -----
@@ -686,9 +737,16 @@ export async function turboRenderAll(file, parts, opts, cb) {
         }));
       }
 
-      // Les sorties sont consommées dans les callbacks : plus rien à vider ici.
-      // Il reste à freiner l'alimentation quand l'encodeur prend du retard.
-      if (vdec.decodeQueueSize > 24 || venc.encodeQueueSize > 24) await sleep(4);
+      // BARRIERE, pas un simple ralentissement. Un « if ... await sleep(4) »
+      // ne fait que ralentir : on continuait a alimenter des milliers de
+      // paquets alors que l'encodeur etait deja sature, et sa file interne
+      // grossissait sans limite jusqu'au blocage. Ici on ATTEND que les files
+      // redescendent, ce qui borne reellement la memoire en vol — et laisse
+      // peu de travail au flush final, la ou aucun freinage n'est possible.
+      while (vdec.decodeQueueSize > 16 || venc.encodeQueueSize > 16) {
+        sink.check();
+        await sleep(8);
+      }
     }
 
     // Un décodeur qui ne rend jamais la main bloquait le traitement pour
@@ -756,6 +814,22 @@ export async function turboRenderAll(file, parts, opts, cb) {
     venc.close();
     muxer.finalize();
     sink.check();       // ne jamais livrer un MP4 tronqué comme s'il était bon
+
+    // Une partie muette alors que la source a du son est un ECHEC, pas un
+    // resultat : mieux vaut basculer sur ffmpeg que livrer un fichier sans
+    // audio sans rien dire. C'est exactement ce qui s'est produit tant que les
+    // exceptions des callbacks de decodage etaient perdues.
+    if (aT && audioSamples === 0) {
+      throw new Error(
+        `partie ${part.index + 1} rendue sans audio alors que la source en a ` +
+        `(aucun échantillon récupéré sur ${map.length} segment(s))`);
+    }
+    if (cb.onLog) {
+      cb.onLog(`   partie ${part.index + 1} : ${framesOut} image(s), ` +
+               `${(audioSamples / (aSR || 1)).toFixed(1)} s d'audio` +
+               (planarRefused ? ' (audio désentrelacé sur repli)' : ''));
+    }
+
     const blob = new Blob([target.buffer], { type: 'video/mp4' });
 
     processedSec += partDurUs / US;

@@ -1232,6 +1232,7 @@ processBtn.addEventListener('click', async () => {
           sfx: { type: CONFIG.sfxType, gainDb: CONFIG.sfxGainDb },
           eq: { freqs: EQ_FREQS, gains: EQ.gains, q: EQ.q, highpass: EQ.highpass, normalize: EQ.normalize },
         }, {
+          onLog: log,          // diagnostics par partie (images, durée d'audio)
           shouldStop: () => paused,
           onPartStart: c => {
             c.status = 'running'; updatePartRow(c);
