@@ -24,9 +24,27 @@ const CONFIG = {
 };
 
 const ANALYSIS_SR       = 8000; // Hz : piste mono basse fréquence pour l'analyse
-const AUTO_CHUNK_ABOVE  = 300;  // au-delà de 5 min, découpe automatique
-const AUTO_CHUNK_SEC    = 240;  // durée cible d'une partie en mode auto
-const MAX_SEG_PER_CHUNK = 40;   // une partie ne dépasse jamais 40 segments
+// Le découpage en parties dépend du MOTEUR, parce que ses deux raisons d'être
+// n'ont pas le même poids selon la vitesse de rendu.
+//
+// ffmpeg encode à ~0,2× temps réel : sur une heure de vidéo, pouvoir reprendre
+// après un plantage n'est pas un confort, c'est une nécessité. Et son
+// `filter_complex` grossit de deux branches par segment conservé — au-delà
+// d'une quarantaine, la commande devient ingérable.
+//
+// Le moteur turbo traite la même vidéo en quelques secondes, et un segment n'y
+// coûte rien de structurel : juste une ligne de plus dans une table de
+// correspondance. En revanche CHAQUE frontière de partie a un coût réel — un
+// flush du décodeur (donc un groupe d'images à rejouer), un remultiplexage, et
+// une couture de plus à l'assemblage. Autant en faire le moins possible.
+const CHUNKING = {
+  // Au-delà de cette durée, on découpe automatiquement.
+  autoAbove: { turbo: 1200, compat: 300 },
+  // Durée visée pour une partie.
+  autoSec:   { turbo: 600,  compat: 240 },
+  // Plafond de segments par partie. Sans objet en turbo.
+  maxSeg:    { turbo: Infinity, compat: 40 },
+};
 
 // Réglages passés à silence.js (module pur, testé par `npm test`).
 const silenceCfg = () => ({
@@ -39,9 +57,9 @@ const silenceCfg = () => ({
 });
 const chunkOpts = () => ({
   chunkMode: CONFIG.chunkMode,
-  autoAbove: AUTO_CHUNK_ABOVE,
-  autoSec: AUTO_CHUNK_SEC,
-  maxSegPerChunk: MAX_SEG_PER_CHUNK,
+  autoAbove: CHUNKING.autoAbove[engine],
+  autoSec: CHUNKING.autoSec[engine],
+  maxSegPerChunk: CHUNKING.maxSeg[engine],
 });
 
 // Encodage forcé, identique sur toutes les parties : sinon la réunion
@@ -371,7 +389,8 @@ function refreshEngine() {
         : '🐢 WebCodecs indisponible sur ce navigateur : moteur logiciel utilisé.');
 }
 if (!TURBO_OK) { engineSel.value = 'compat'; engineSel.disabled = true; }
-engineSel.addEventListener('change', refreshEngine);
+// Le découpage en parties dépend du moteur : l'aperçu doit suivre.
+engineSel.addEventListener('change', () => { refreshEngine(); queueCutsRefresh(); });
 refreshEngine();
 
 // --- Égaliseur ---
@@ -516,7 +535,7 @@ async function sourcesChanged() {
   if (srcSig() !== sigAtProbe) return; // la liste a changé pendant la sonde
   const total = durs.reduce((a, d) => a + d, 0);
   queueHint.textContent = total > 0
-    ? `Durée totale : ~${fmtTime(total)}${total > AUTO_CHUNK_ABOVE ? ' — traitement par parties.' : ''}`
+    ? `Durée totale : ~${fmtTime(total)}${total > CHUNKING.autoAbove[engine] ? ' — traitement par parties.' : ''}`
     : '';
   await tryResume();
 }
@@ -826,12 +845,14 @@ function refreshCuts() {
     `${fmtTime(kept)} de vidéo finale, en ${parts.length} partie(s). ` +
     `Zones claires = conservées, zones sombres = supprimées.`;
 
-  // Une partie s'arrête aussi au bout de MAX_SEG_PER_CHUNK segments : sans
-  // cette phrase, l'utilisateur qui demande « 4 minutes » et obtient des
-  // parties de 90 s n'a aucun moyen de comprendre pourquoi.
-  if (parts.some(p => p.segs.length >= MAX_SEG_PER_CHUNK)) {
+  // En moteur compatible, une partie s'arrête aussi au bout d'un certain nombre
+  // de segments : sans cette phrase, l'utilisateur qui demande « 4 minutes » et
+  // obtient des parties de 90 s n'a aucun moyen de comprendre pourquoi.
+  const maxSeg = CHUNKING.maxSeg[engine];
+  if (isFinite(maxSeg) && parts.some(p => p.segs.length >= maxSeg)) {
     cutsHint.textContent +=
-      ` Certaines parties sont plus courtes que demandé : une partie ne dépasse jamais ${MAX_SEG_PER_CHUNK} segments.`;
+      ` Certaines parties sont plus courtes que demandé : avec le moteur compatible,` +
+      ` une partie ne dépasse jamais ${maxSeg} segments.`;
   }
 }
 
