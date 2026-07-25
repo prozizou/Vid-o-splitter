@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { snapshotSample, resolveDataStream, withTimeout } from '../turbo.js';
+import { snapshotSample, resolveDataStream, withTimeout, createGopPrimer } from '../turbo.js';
 
 /**
  * Régression : le moteur turbo n'a jamais pu démarrer parce que les
@@ -159,4 +159,81 @@ test('withTimeout n\'empêche pas le processus de se terminer', async () => {
   const t0 = Date.now();
   await withTimeout(Promise.resolve(1), 60_000, 'inutile');
   assert.ok(Date.now() - t0 < 1000, 'retour immédiat');
+});
+
+/**
+ * Régression : la 2e partie et les suivantes échouaient sur
+ *
+ *   Failed to execute 'decode' on 'VideoDecoder': A key frame is required
+ *   after configure() or flush().
+ *
+ * `turboRenderAll` appelle `vdec.flush()` à la fin de chaque partie pour
+ * récupérer les dernières images. Après un flush, WebCodecs exige une image
+ * clé, or la partie suivante reprend le flux au milieu d'un groupe d'images.
+ */
+const cle   = (n) => ({ type: 'key',   timestamp: n, data: `k${n}` });
+const inter = (n) => ({ type: 'delta', timestamp: n, data: `d${n}` });
+
+test('en marche normale, rien n\'est rejoué', () => {
+  const p = createGopPrimer();
+  assert.deepEqual(p.accept(cle(0)), []);
+  assert.deepEqual(p.accept(inter(1)), []);
+  assert.deepEqual(p.accept(inter(2)), []);
+});
+
+test('après un flush, le début du groupe d\'images est rejoué', () => {
+  const p = createGopPrimer();
+  p.accept(cle(0));
+  p.accept(inter(1));
+  p.accept(inter(2));
+
+  p.afterFlush();                       // fin d'une partie
+  const rejoue = p.accept(inter(3));    // la partie suivante reprend ici
+
+  assert.deepEqual(rejoue.map(c => c.timestamp), [0, 1, 2],
+    'la clé et les intermédiaires déjà vus doivent précéder le paquet courant');
+  assert.equal(rejoue[0].type, 'key', 'le premier rejoué DOIT être une image clé');
+});
+
+test('après un flush, une image clé ne déclenche aucun rejeu', () => {
+  const p = createGopPrimer();
+  p.accept(cle(0));
+  p.accept(inter(1));
+  p.afterFlush();
+  assert.deepEqual(p.accept(cle(10)), [], 'inutile d\'amorcer : c\'est déjà une clé');
+});
+
+test('un seul rejeu par flush, pas à chaque paquet suivant', () => {
+  const p = createGopPrimer();
+  p.accept(cle(0));
+  p.accept(inter(1));
+  p.afterFlush();
+  assert.equal(p.accept(inter(2)).length, 2, 'amorçage sur le premier paquet');
+  assert.deepEqual(p.accept(inter(3)), [], 'puis plus rien');
+  assert.deepEqual(p.accept(inter(4)), [], 'toujours rien');
+});
+
+test('une image clé purge le tampon : il ne grandit pas indéfiniment', () => {
+  const p = createGopPrimer();
+  p.accept(cle(0));
+  for (let i = 1; i <= 50; i++) p.accept(inter(i));
+  assert.equal(p.bufferedCount, 51);
+  p.accept(cle(100));
+  assert.equal(p.bufferedCount, 1, 'le tampon repart de la nouvelle clé');
+});
+
+test('deux flushs successifs amorcent chacun correctement', () => {
+  // Une vidéo découpée en douze parties enchaîne autant de flushs.
+  const p = createGopPrimer();
+  p.accept(cle(0));
+  p.accept(inter(1));
+
+  p.afterFlush();
+  assert.equal(p.accept(inter(2))[0].type, 'key');
+
+  p.accept(inter(3));
+  p.afterFlush();
+  const second = p.accept(inter(4));
+  assert.equal(second[0].type, 'key', 'le rejeu repart toujours d\'une clé');
+  assert.deepEqual(second.map(c => c.timestamp), [0, 1, 2, 3]);
 });

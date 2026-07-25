@@ -89,6 +89,58 @@ const guarded = (sink, prefix, fn) => (...args) => {
 };
 
 /**
+ * Rejoue le début d'un groupe d'images après un `flush()`.
+ *
+ * `turboRenderAll` appelle `vdec.flush()` à la fin de chaque partie, pour que
+ * le décodeur rende ses dernières images. Mais après un flush, WebCodecs EXIGE
+ * une image clé :
+ *
+ *   Failed to execute 'decode' on 'VideoDecoder': A key frame is required
+ *   after configure() or flush().
+ *
+ * Or la partie suivante reprend le flux là où la précédente s'est arrêtée,
+ * c'est-à-dire presque toujours AU MILIEU d'un groupe d'images. Le premier
+ * paquet fourni est alors une image intermédiaire, et le décodage échoue.
+ *
+ * On garde donc en mémoire les paquets ENCODÉS depuis la dernière image clé —
+ * quelques centaines de kilo-octets, pas des trames décodées — et on les
+ * rejoue avant de reprendre. Les images ainsi reproduites appartiennent à la
+ * partie précédente ou au silence supprimé : `emit()` les écarte via `inRange`,
+ * elles ne polluent donc pas la sortie.
+ *
+ * Sauter les paquets jusqu'à la prochaine image clé aurait été plus simple,
+ * mais aurait perdu jusqu'à un groupe d'images entier — une à deux secondes de
+ * vidéo — au début de chaque partie.
+ */
+export function createGopPrimer() {
+  let gop = [];            // paquets depuis la dernière image clé, incluse
+  let needPrime = false;   // un flush a eu lieu : le décodeur attend une clé
+
+  return {
+    /** À appeler après chaque `flush()` du décodeur vidéo. */
+    afterFlush() { needPrime = true; },
+
+    /**
+     * Enregistre un paquet et indique ce qu'il faut décoder AVANT lui.
+     * @returns les paquets à rejouer (vide dans le cas courant).
+     */
+    accept(chunk) {
+      if (chunk.type === 'key') {
+        gop = [chunk];
+        needPrime = false;
+        return [];
+      }
+      const replay = needPrime ? gop.slice() : [];
+      needPrime = false;
+      gop.push(chunk);
+      return replay;
+    },
+
+    get bufferedCount() { return gop.length; },
+  };
+}
+
+/**
  * Localise la classe DataStream de mp4box.
  *
  * Le bundle `mp4box.all.js` expose DEUX globaux distincts : `MP4Box`, qui ne
@@ -440,6 +492,10 @@ export async function turboRenderAll(file, parts, opts, cb) {
   let emitFrame = null;       // (VideoFrame) => void
   let takeAudio = null;       // (AudioData)  => void
 
+  // Rejoue le debut du GOP apres chaque flush : sans lui, la 2e partie et les
+  // suivantes echouent sur « A key frame is required after flush() ».
+  const primer = createGopPrimer();
+
   const vdec = new VideoDecoder({
     output: f => { if (emitFrame) emitFrame(f); else f.close(); },
     error: e => sink.fail(e, 'Décodage vidéo'),
@@ -613,10 +669,16 @@ export async function turboRenderAll(file, parts, opts, cb) {
 
       if (item.id === vT.id) {
         if (needed[s.number]) {
-          vdec.decode(new EncodedVideoChunk({
+          const chunk = {
             type: s.is_sync ? 'key' : 'delta', timestamp: ts,
             duration: usOf(s.duration, s.timescale), data: s.data,
-          }));
+          };
+          // Après un flush, le décodeur exige une image clé : on lui rejoue le
+          // début du groupe d'images en cours. Voir createGopPrimer().
+          for (const prime of primer.accept(chunk)) {
+            vdec.decode(new EncodedVideoChunk(prime));
+          }
+          vdec.decode(new EncodedVideoChunk(chunk));
         }
       } else if (aT && item.id === aT.id) {
         adec.decode(new EncodedAudioChunk({
@@ -634,6 +696,7 @@ export async function turboRenderAll(file, parts, opts, cb) {
     // sur ffmpeg. Le délai est large — il ne doit se déclencher qu'en cas de
     // blocage réel, pas sur une machine lente.
     await withTimeout(vdec.flush(), FLUSH_TIMEOUT_MS, 'le décodeur vidéo ne répond plus');
+    primer.afterFlush();   // le décodeur exigera une image clé
     if (adec) await withTimeout(adec.flush(), FLUSH_TIMEOUT_MS, 'le décodeur audio ne répond plus');
 
     // On débranche AVANT de fermer l'encodeur : une trame arrivée en retard
