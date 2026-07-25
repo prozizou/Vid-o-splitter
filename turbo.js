@@ -503,6 +503,20 @@ export async function turboRenderAll(file, parts, opts, cb) {
       video: { codec: 'avc', width: W, height: H },
       audio: aT ? { codec: 'aac', numberOfChannels: aCH, sampleRate: aSR } : undefined,
       fastStart: 'in-memory',
+      // La toute premiere image d'une partie ne tombe presque jamais pile sur
+      // le debut du segment : les images n'existent qu'aux bornes de trame,
+      // alors que la coupe est calculee sur l'audio. mp4-muxer refuse par
+      // defaut un premier paquet dont l'horodatage n'est pas nul :
+      //   « The first chunk for your media track must have a timestamp of 0
+      //     (received DTS=0.003333) »
+      //
+      // On NE prend PAS l'option « offset » que suggere ce message : elle
+      // soustrait a chaque piste SA propre premiere valeur, donc elle
+      // decalerait la video sans toucher a l'audio — exactement le genre de
+      // desynchronisation corrige dans turboJoin. « cross-track-offset »
+      // soustrait aux DEUX pistes le minimum des deux : le debut revient a
+      // zero ET l'alignement relatif est preserve.
+      firstTimestampBehavior: 'cross-track-offset',
     });
 
     const venc = new VideoEncoder({
@@ -717,6 +731,9 @@ export async function turboJoin(blobs) {
         video: { codec: 'avc', width: vT.track_width, height: vT.track_height },
         audio: aT ? { codec: 'aac', numberOfChannels: Math.min(2, aT.audio.channel_count), sampleRate: aT.audio.sample_rate } : undefined,
         fastStart: 'in-memory',
+        // Meme raison que dans turboRenderAll : base commune aux deux pistes,
+        // jamais une base par piste, qui les desynchroniserait.
+        firstTimestampBehavior: 'cross-track-offset',
       });
     }
     const vDesc = videoDescription(stream.mp4, vT.id, MP4Box);
@@ -809,6 +826,9 @@ export async function turboMerge(files, onProgress) {
         video: { codec: 'avc', width: vT.track_width, height: vT.track_height },
         audio: aT ? { codec: 'aac', numberOfChannels: Math.min(2, aT.audio.channel_count), sampleRate: aT.audio.sample_rate } : undefined,
         fastStart: 'in-memory',
+        // Meme raison que dans turboRenderAll : base commune aux deux pistes,
+        // jamais une base par piste, qui les desynchroniserait.
+        firstTimestampBehavior: 'cross-track-offset',
       });
     } else {
       const compatible =
