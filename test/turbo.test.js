@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { snapshotSample, resolveDataStream, withTimeout, createGopPrimer } from '../turbo.js';
+import { snapshotSample, resolveDataStream, withTimeout, createGopPrimer, drainTo } from '../turbo.js';
 
 /**
  * Régression : le moteur turbo n'a jamais pu démarrer parce que les
@@ -236,4 +236,59 @@ test('deux flushs successifs amorcent chacun correctement', () => {
   const second = p.accept(inter(4));
   assert.equal(second[0].type, 'key', 'le rejeu repart toujours d\'une clé');
   assert.deepEqual(second.map(c => c.timestamp), [0, 1, 2, 3]);
+});
+
+/**
+ * La contre-pression sondait la file toutes les 8 ms. Sur une video de 10 min
+ * a 30 images/s, si la barriere se declenche a chaque image, cela represente
+ * pres de deux minutes et demie passees a attendre un minuteur plutot qu'a
+ * encoder. `drainTo` se reveille sur l'evenement `dequeue` de WebCodecs.
+ */
+function fauxCodec(taille, { avecEvenement = true } = {}) {
+  const ecouteurs = new Set();
+  return {
+    encodeQueueSize: taille,
+    ondequeue: avecEvenement ? null : undefined,
+    addEventListener: avecEvenement ? (_, fn) => ecouteurs.add(fn) : undefined,
+    removeEventListener: avecEvenement ? (_, fn) => ecouteurs.delete(fn) : undefined,
+    /** Simule le codec qui consomme un element et emet `dequeue`. */
+    consommer() {
+      this.encodeQueueSize--;
+      for (const fn of [...ecouteurs]) fn();
+    },
+    get nbEcouteurs() { return ecouteurs.size; },
+  };
+}
+
+test('drainTo rend la main immediatement si la file est deja courte', async () => {
+  const c = fauxCodec(2);
+  await drainTo(c, 'encodeQueueSize', 6);
+  assert.equal(c.nbEcouteurs, 0, 'aucun ecouteur ne doit rester attache');
+});
+
+test('drainTo attend l\'evenement dequeue, pas un minuteur', async () => {
+  const c = fauxCodec(9);
+  let resolu = false;
+  const attente = drainTo(c, 'encodeQueueSize', 6).then(() => { resolu = true; });
+
+  await null;
+  assert.equal(resolu, false, 'ne doit pas se resoudre tant que la file est pleine');
+
+  c.consommer();                       // 8
+  c.consommer();                       // 7
+  await null;
+  assert.equal(resolu, false, 'toujours au-dessus du plafond');
+
+  c.consommer();                       // 6 -> sous le plafond
+  await attente;
+  assert.equal(resolu, true);
+  assert.equal(c.nbEcouteurs, 0, 'l\'ecouteur doit etre retire');
+});
+
+test('drainTo fonctionne sans l\'evenement dequeue (repli par sondage)', async () => {
+  const c = fauxCodec(8, { avecEvenement: false });
+  const attente = drainTo(c, 'encodeQueueSize', 6);
+  setTimeout(() => { c.encodeQueueSize = 3; }, 10);
+  await attente;
+  assert.ok(c.encodeQueueSize <= 6);
 });

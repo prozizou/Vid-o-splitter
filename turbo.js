@@ -72,6 +72,36 @@ export function withTimeout(promise, ms, message) {
   return Promise.race([promise, limite]).finally(() => clearTimeout(t));
 }
 
+/**
+ * Attend qu'une file de codec redescende sous `max`.
+ *
+ * Sonder toutes les 8 ms coute cher : sur une video de 10 min a 30 images/s,
+ * si la barriere se declenche a chaque image, on passe pres de deux minutes et
+ * demie a attendre un minuteur plutot qu'a encoder. WebCodecs expose
+ * l'evenement `dequeue`, emis des qu'une place se libere : on est reveille au
+ * bon moment, sans latence de sondage.
+ *
+ * Repli par sondage pour les navigateurs qui ne l'exposent pas encore.
+ * @param sizeKey 'decodeQueueSize' ou 'encodeQueueSize'
+ */
+export function drainTo(codec, sizeKey, max) {
+  if (codec[sizeKey] <= max) return Promise.resolve();
+  return new Promise(resolve => {
+    if (typeof codec.addEventListener === 'function' && 'ondequeue' in codec) {
+      const onDequeue = () => {
+        if (codec[sizeKey] > max) return;
+        codec.removeEventListener('dequeue', onDequeue);
+        resolve();
+      };
+      codec.addEventListener('dequeue', onDequeue);
+      onDequeue();                       // la place s'est peut-etre deja liberee
+    } else {
+      const poll = () => (codec[sizeKey] <= max ? resolve() : setTimeout(poll, 4));
+      poll();
+    }
+  });
+}
+
 /* Collecteur d'erreurs WebCodecs.
    Les callbacks `error:` et `output:` des codecs sont appelés par le navigateur
    dans leur propre tâche : une exception levée depuis là ne rejette PAS la
@@ -779,10 +809,10 @@ async function renderAllOnce(file, parts, opts, cb, accel) {
       // grossissait sans limite jusqu'au blocage. Ici on ATTEND que les files
       // redescendent, ce qui borne reellement la memoire en vol — et laisse
       // peu de travail au flush final, la ou aucun freinage n'est possible.
-      while (vdec.decodeQueueSize > IN_FLIGHT_MAX || venc.encodeQueueSize > IN_FLIGHT_MAX) {
-        sink.check();
-        await sleep(8);
-      }
+      // Reveil sur evenement, pas sondage : voir drainTo().
+      if (venc.encodeQueueSize > IN_FLIGHT_MAX) await drainTo(venc, 'encodeQueueSize', IN_FLIGHT_MAX);
+      if (vdec.decodeQueueSize > IN_FLIGHT_MAX) await drainTo(vdec, 'decodeQueueSize', IN_FLIGHT_MAX);
+      sink.check();
     }
 
     // Un décodeur qui ne rend jamais la main bloquait le traitement pour

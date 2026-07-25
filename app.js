@@ -1305,6 +1305,12 @@ processBtn.addEventListener('click', async () => {
     if (!paused) {
       const speed = clock.totalSec && clock.start
         ? ` (${(clock.doneSec / ((performance.now() - clock.start) / 1000)).toFixed(1)}× temps réel)` : '';
+      if (engine === 'turbo' && clock.totalSec && clock.start) {
+        const x = clock.doneSec / ((performance.now() - clock.start) / 1000);
+        // Sous 2x, l'encodage n'est presque sûrement pas matériel : autant le
+        // dire, plutôt que de laisser croire que c'est la vitesse attendue.
+        if (x < 2) log(`ℹ️ Vitesse ${x.toFixed(1)}× : l'encodage n'a probablement pas été matériel.`);
+      }
       setStatus(`🎉 ${done}/${job.chunks.length} parties prêtes${speed}. Vérifiez les aperçus, puis réunissez-les.`);
       notify('Traitement terminé', `${done} partie(s) prêtes à être réunies.`);
     }
