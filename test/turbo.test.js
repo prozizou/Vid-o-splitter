@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { snapshotSample, resolveDataStream } from '../turbo.js';
+import { snapshotSample, resolveDataStream, withTimeout } from '../turbo.js';
 
 /**
  * Régression : le moteur turbo n'a jamais pu démarrer parce que les
@@ -115,4 +115,48 @@ test('BIG_ENDIAN vaut false chez mp4box et doit être transmis tel quel', () => 
   const DS = resolveDataStream(null, { DataStream });
   assert.equal(DS.BIG_ENDIAN, false);
   assert.notEqual(DS.BIG_ENDIAN, DS.LITTLE_ENDIAN);
+});
+
+/**
+ * Régression : le rendu pouvait se bloquer indéfiniment SANS erreur.
+ *
+ * Les trames décodées étaient empilées dans un tableau vidé par intermittence.
+ * `await vdec.flush()` fait sortir d'un coup toutes celles que le décodeur
+ * matériel retenait ; sur une minute et demie de vidéo cela fait des milliers
+ * de VideoFrame vivantes en même temps. Une VideoFrame non fermée retient de la
+ * mémoire GPU, et les décodeurs cessent de produire quand trop de trames
+ * restent ouvertes : `flush()` ne se résolvait alors jamais. L'interface restait
+ * sur « Partie 1/1 » sans rien signaler.
+ *
+ * Deux réponses : consommer les sorties dans le callback (plus aucune
+ * accumulation), et borner l'attente pour qu'un blocage devienne une erreur —
+ * app.js bascule alors sur ffmpeg au lieu d'attendre pour toujours.
+ */
+test('withTimeout laisse passer une promesse qui aboutit', async () => {
+  const valeur = await withTimeout(Promise.resolve('ok'), 1000, 'jamais');
+  assert.equal(valeur, 'ok');
+});
+
+test('withTimeout rejette avec un message explicite quand ça bloque', async () => {
+  const jamais = new Promise(() => {});         // ne se résout jamais
+  await assert.rejects(
+    () => withTimeout(jamais, 20, 'le décodeur vidéo ne répond plus'),
+    /le décodeur vidéo ne répond plus.*20 s|le décodeur vidéo ne répond plus/,
+  );
+});
+
+test('withTimeout laisse remonter l\'erreur d\'origine', async () => {
+  await assert.rejects(
+    () => withTimeout(Promise.reject(new Error('panne du codec')), 1000, 'délai'),
+    /panne du codec/,
+    'une vraie erreur ne doit pas être masquée par le garde-fou',
+  );
+});
+
+test('withTimeout n\'empêche pas le processus de se terminer', async () => {
+  // Le minuteur doit être annulé : sinon chaque appel laisserait un setTimeout
+  // en vie, et sur une vidéo découpée en douze parties cela s'accumulerait.
+  const t0 = Date.now();
+  await withTimeout(Promise.resolve(1), 60_000, 'inutile');
+  assert.ok(Date.now() - t0 < 1000, 'retour immédiat');
 });

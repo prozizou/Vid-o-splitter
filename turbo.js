@@ -50,6 +50,19 @@ function loadMuxer() { return _muxer || (_muxer = import(MUXER_URL)); }
 const sleep = (ms = 0) => new Promise(r => setTimeout(r, ms));
 const usOf = (cts, timescale) => Math.round((cts / timescale) * US);
 
+// Delai avant de considerer qu'un codec est bloque. Large a dessein : il ne
+// doit se declencher que sur un vrai blocage, jamais sur un appareil lent.
+const FLUSH_TIMEOUT_MS = 90_000;
+
+/** Rejette si la promesse n'aboutit pas a temps, au lieu d'attendre sans fin. */
+export function withTimeout(promise, ms, message) {
+  let t;
+  const limite = new Promise((_, rej) => {
+    t = setTimeout(() => rej(new Error(`${message} (aucune réponse après ${Math.round(ms / 1000)} s)`)), ms);
+  });
+  return Promise.race([promise, limite]).finally(() => clearTimeout(t));
+}
+
 /* Collecteur d'erreurs WebCodecs.
    Les callbacks `error:` et `output:` des codecs sont appelés par le navigateur
    dans leur propre tâche : une exception levée depuis là ne rejette PAS la
@@ -409,19 +422,35 @@ export async function turboRenderAll(file, parts, opts, cb) {
   }
 
   // --- Décodeurs (partagés entre les parties, jamais réinitialisés) --
-  let pending = [];           // trames décodées en attente de tri
+  //
+  // Les sorties sont consommées DANS le callback, jamais accumulees.
+  //
+  // Elles etaient auparavant empilees dans un tableau vide par intermittence.
+  // Or `await vdec.flush()` fait sortir d'un coup toutes les trames encore
+  // retenues par le decodeur materiel, qui en bufferise beaucoup : sur une
+  // minute et demie de video, cela fait des milliers de VideoFrame vivantes en
+  // meme temps. Une VideoFrame non fermee retient de la memoire GPU, et les
+  // decodeurs WebCodecs cessent de produire quand trop de trames restent
+  // ouvertes — `flush()` ne se resolvait alors jamais, SANS erreur. Le
+  // traitement restait bloque indefiniment sur « Partie 1/1 ».
+  //
+  // Les decodeurs sont partages entre les parties tandis que emit()/grabAudio()
+  // dependent de la partie en cours : d'ou ces deux aiguillages, reaffectes au
+  // debut de chaque partie.
+  let emitFrame = null;       // (VideoFrame) => void
+  let takeAudio = null;       // (AudioData)  => void
+
   const vdec = new VideoDecoder({
-    output: f => pending.push(f),
+    output: f => { if (emitFrame) emitFrame(f); else f.close(); },
     error: e => sink.fail(e, 'Décodage vidéo'),
   });
   vdec.configure({ codec: vT.codec, codedWidth: W, codedHeight: H, description: vDesc,
                    hardwareAcceleration: 'prefer-hardware', optimizeForLatency: false });
 
-  let audioPending = [];
   let adec = null;
   if (aT) {
     adec = new AudioDecoder({
-      output: d => audioPending.push(d),
+      output: d => { if (takeAudio) takeAudio(d); else d.close(); },
       error: e => sink.fail(e, 'Décodage audio'),
     });
     adec.configure({
@@ -483,11 +512,23 @@ export async function turboRenderAll(file, parts, opts, cb) {
     venc.configure(encCfg);
 
     let lastKey = -Infinity, firstFrame = true;
+    // Avancement DANS la partie. Sans lui, `onProgress` n'etait appele qu'a la
+    // fin de chaque partie : sur un fichier rendu en une seule partie, la barre
+    // restait figee sur la valeur laissee par l'analyse, du debut a la fin. On
+    // ne pouvait pas distinguer « ca travaille » de « c'est bloque ».
+    let emittedUs = 0, lastReport = 0;
     const emit = frame => {
       const m = inRange(frame.timestamp);
       if (!m) { frame.close(); return; }
       const outTs = m.off + (frame.timestamp - m.s);
       const dur = frame.duration || Math.round(US / fps);
+
+      emittedUs = Math.max(emittedUs, outTs + dur);
+      const now = performance.now();
+      if (cb.onProgress && now - lastReport > 150) {
+        lastReport = now;
+        cb.onProgress(processedSec + emittedUs / US);
+      }
 
       // Fondu au noir très bref de part et d'autre de chaque raccord.
       const alpha = fadeUs ? alphaAt(outTs, fadePts, fadeUs) : 1;
@@ -543,6 +584,10 @@ export async function turboRenderAll(file, parts, opts, cb) {
     };
 
     // --- Alimentation des décodeurs jusqu'à la fin de la partie -----
+    // Les sorties des décodeurs partent directement vers cette partie.
+    emitFrame = emit;
+    takeAudio = grabAudio;
+
     const endUs = Math.round(part.t1 * US);
     let item;
     while ((item = await stream.peek())) {
@@ -565,18 +610,25 @@ export async function turboRenderAll(file, parts, opts, cb) {
         }));
       }
 
-      if (vdec.decodeQueueSize > 24 || pending.length > 24) {
-        while (pending.length) emit(pending.shift());
-        while (audioPending.length) grabAudio(audioPending.shift());
-        if (venc.encodeQueueSize > 24) await sleep(4);
-      }
+      // Les sorties sont consommées dans les callbacks : plus rien à vider ici.
+      // Il reste à freiner l'alimentation quand l'encodeur prend du retard.
+      if (vdec.decodeQueueSize > 24 || venc.encodeQueueSize > 24) await sleep(4);
     }
 
-    await vdec.flush();
-    if (adec) await adec.flush();
-    while (pending.length) emit(pending.shift());
-    while (audioPending.length) grabAudio(audioPending.shift());
-    await venc.flush();
+    // Un décodeur qui ne rend jamais la main bloquait le traitement pour
+    // toujours, sans message : mieux vaut échouer et laisser app.js basculer
+    // sur ffmpeg. Le délai est large — il ne doit se déclencher qu'en cas de
+    // blocage réel, pas sur une machine lente.
+    await withTimeout(vdec.flush(), FLUSH_TIMEOUT_MS, 'le décodeur vidéo ne répond plus');
+    if (adec) await withTimeout(adec.flush(), FLUSH_TIMEOUT_MS, 'le décodeur audio ne répond plus');
+
+    // On débranche AVANT de fermer l'encodeur : une trame arrivée en retard
+    // serait sinon poussée dans un encodeur fermé. Les sorties tardives sont
+    // désormais simplement libérées (voir les callbacks des décodeurs).
+    emitFrame = null;
+    takeAudio = null;
+
+    await withTimeout(venc.flush(), FLUSH_TIMEOUT_MS, "l'encodeur vidéo ne répond plus");
     sink.check();
 
     // --- Audio : fondus, égaliseur, encodage -----------------------
