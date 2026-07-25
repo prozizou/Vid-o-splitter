@@ -28,7 +28,7 @@ par `npm test` (lanceur integre de Node, aucune dependance a installer) :
 | `loudness.js` | mesure de sonie BS.1770-4 (ponderation K + portes) et limiteur |
 | `sfx.js` | synthese des sons de transition, ecriture WAV, fondus |
 
-    npm test        # 43 tests, ~1 s
+    npm test        # 66 tests, ~1 s
 
 ## Apercu des coupes
 
@@ -186,9 +186,35 @@ Barre + pourcentage, phase en cours (« Partie 3/12 »), temps restant estime et
 vitesse reelle (`12.4x` en Turbo, `0.2x` en Compatible).
 
 ### Reglage « Duree des parties »
-- **Automatique** : une seule partie sous 5 min, parties de 4 min au-dela.
+
+Le decoupage depend du MOTEUR, parce que ses deux raisons d'etre n'ont pas le
+meme poids selon la vitesse de rendu.
+
+|  | turbo | compatible (ffmpeg) |
+|---|---|---|
+| Decoupage automatique au-dela de | 20 min | 5 min |
+| Duree visee d'une partie | 10 min | 4 min |
+| Plafond de segments par partie | aucun | 40 |
+
+ffmpeg encode a ~0,2x temps reel : sur une heure de video, pouvoir reprendre
+apres un plantage est une necessite, et son `filter_complex` grossit de deux
+branches par segment conserve — au-dela d'une quarantaine, la commande devient
+ingerable.
+
+Le moteur turbo traite la meme video en quelques secondes, et un segment n'y
+coute rien de structurel. En revanche CHAQUE frontiere de partie a un cout
+reel : un flush du decodeur (donc un groupe d'images a rejouer), un
+remultiplexage, une couture de plus a l'assemblage. C'est d'ailleurs de ces
+frontieres que venaient la plupart des defauts corriges dans les versions
+recentes. On en fait donc le moins possible.
+
+Le plafond de 40 segments etait auparavant applique aux deux moteurs : c'est
+lui — et non la duree — qui decoupait une video de 10 min riche en segments en
+plusieurs parties.
+
+- **Automatique** : selon le tableau ci-dessus.
 - **2 min** : telephone a memoire limitee.
-- **Une seule partie** : pour les clips courts.
+- **Une seule partie** : impose le fichier entier d'un seul tenant.
 
 ### Dependances du build
 Aucun `npm install` : `build.sh` telecharge les tarballs npm et copie ce dont

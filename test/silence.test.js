@@ -160,3 +160,37 @@ test('loudFromPCM mesure le bon RMS sur une sinusoïde', () => {
   const moyen = loud.reduce((a, b) => a + b, 0) / loud.length;
   near(moyen, 0.5 / Math.SQRT2, 0.01, 'RMS d\'une sinusoïde d\'amplitude 0,5');
 });
+
+/**
+ * Le plafond de segments par partie n'a de sens que pour ffmpeg, dont le
+ * `filter_complex` grossit de deux branches par segment. En turbo un segment
+ * ne coûte rien de structurel, et chaque frontière de partie a un coût réel :
+ * un flush du décodeur, un remultiplexage, une couture de plus.
+ *
+ * C'est ce plafond — pas la durée — qui découpait une vidéo de 10 min riche en
+ * segments en plusieurs parties, avec tous les défauts que les frontières
+ * entraînent.
+ */
+test('sans plafond de segments, la durée seule décide du découpage', () => {
+  // 159 segments sur ~10 min : le cas réel qui posait problème.
+  const segs = Array.from({ length: 159 }, (_, i) => [i * 3.9, i * 3.9 + 3.2]);
+  const duration = 620;
+
+  const avecPlafond = planChunks(segs, duration, { chunkMode: 'auto', autoAbove: 300, autoSec: 240, maxSegPerChunk: 40 });
+  const sansPlafond = planChunks(segs, duration, { chunkMode: 'auto', autoAbove: 1200, autoSec: 600, maxSegPerChunk: Infinity });
+
+  assert.ok(avecPlafond.length > 1, `réglage ffmpeg : plusieurs parties (${avecPlafond.length})`);
+  assert.equal(sansPlafond.length, 1, 'réglage turbo : une seule partie sous le seuil de 20 min');
+});
+
+test('le seuil turbo découpe quand même les très longues vidéos', () => {
+  const segs = Array.from({ length: 400 }, (_, i) => [i * 6, i * 6 + 5]);
+  const parts = planChunks(segs, 2400, { chunkMode: 'auto', autoAbove: 1200, autoSec: 600, maxSegPerChunk: Infinity });
+  assert.ok(parts.length > 1, `40 min doit rester découpé, obtenu ${parts.length} partie(s)`);
+});
+
+test('maxSegPerChunk infini ne perd ni ne duplique aucun segment', () => {
+  const segs = Array.from({ length: 200 }, (_, i) => [i * 2, i * 2 + 1.5]);
+  const parts = planChunks(segs, 400, { chunkMode: '120', maxSegPerChunk: Infinity });
+  assert.deepEqual(parts.flatMap(p => p.segs), segs);
+});
