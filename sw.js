@@ -37,6 +37,12 @@ const PAGES = ['/', '/splitter', '/echo', '/studio', '/lyrics'];
 const ASSETS = [
   '/app.js',
   '/turbo.js',
+  '/turbo-util.js',
+  '/turbo-mp4.js',
+  '/turbo-video.js',
+  '/turbo-audio.js',
+  '/turbo-render.js',
+  '/turbo-join.js',
   '/silence.js',
   '/media.js',
   '/sfx.js',

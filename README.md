@@ -172,6 +172,27 @@ WebCodecs : 10x a 50x plus rapide, et l'encodeur materiel chauffe moins la batte
 Une seule passe sur le fichier, dans l'ordre des parties. La reunion finale
 re-empile les paquets deja encodes : aucune image n'est reencodee.
 
+### Découpage du moteur (turbo-*.js)
+
+`turbo.js` n'est plus qu'une **façade** qui ré-exporte l'API publique
+(`turboSupported`, `turboAnalyze`, `turboRenderAll`, `turboJoin`, `turboMerge`).
+Le moteur est réparti en modules à responsabilité unique, pour qu'on puisse en
+lire un sans tout tenir en tête :
+
+| Module | Rôle |
+|---|---|
+| `turbo-util.js`   | constantes de temps, détection WebCodecs, plomberie async (temporisation, barrières de file de codec, collecteur d'erreurs) |
+| `turbo-mp4.js`    | chargement mp4box/mp4-muxer, descriptions de codec, flux d'échantillons paginé, primer de groupe d'images |
+| `turbo-video.js`  | configuration de l'encodeur vidéo (débit, cadence, alignement 16, choix d'une config H.264 supportée) |
+| `turbo-audio.js`  | analyse de sonie, filtre anti-sifflement, égaliseur voix |
+| `turbo-render.js` | le cœur : la passe unique décodage → rendu → encodage |
+| `turbo-join.js`   | réunion des parties et fusion de fichiers, sans réencodage |
+
+`app.js` et les tests continuent d'importer depuis `./turbo.js` uniquement :
+la surface publique n'a pas changé. Les six fichiers sont servis à plat (comme
+tout le shell), donc ils entrent dans l'empreinte de version du service worker
+(`build.sh`) : modifier un module suffit à déclencher une vraie mise à jour.
+
 ### Le moteur « Compatible » reste la
 Selecteur **Moteur** en haut. Turbo par defaut. On retombe automatiquement sur
 ffmpeg.wasm si :
