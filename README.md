@@ -83,6 +83,30 @@ Audio cote turbo. Le rendu n'est donc pas identique au decibel pres entre les
 deux moteurs sur cette option precise. Les bandes de l'egaliseur, elles, sont
 equivalentes (biquad peaking de meme frequence, meme Q, meme gain).
 
+## Format de sortie (conversion)
+
+Selecteur **Format de sortie** sur `/splitter`. Par defaut la video est
+**convertie en 720×1296 @ 30 im/s AVANT le decoupage** (cible verticale des
+reseaux sociaux). Choisir « Conserver la source » retablit l'ancien
+comportement (resolution et cadence d'origine, seul le rognage au multiple de
+16 exige par le materiel est applique).
+
+La conversion se fait EN MEME TEMPS que le rendu, en une seule passe : chaque
+image conservee est mise a l'echelle « remplir » (cover) sur la toile hors
+ecran deja utilisee pour les fondus, puis rognee au centre. Le rapport
+d'aspect est preserve — un plan paysage devient un portrait cadre au centre,
+sans deformation ni bandes noires. On ne sur-echantillonne jamais la cadence :
+viser 30 im/s plafonne a 30, une source plus lente reste a sa cadence.
+
+## Voix : debit audio
+
+Le moteur turbo re-encode l'audio en AAC (la source etant presque toujours
+DEJA de l'AAC, c'est un encodage **en tandem**). A 128 kb/s, la 2e generation
+amplifiait le pre-echo du MDCT et donnait a la voix un timbre « metallique /
+robotique ». Le debit est desormais plus genereux et proportionnel au nombre
+de canaux (≈160 kb/s mono, ≈192 kb/s stereo) : les artefacts disparaissent,
+pour un surcout de taille negligeable sur une piste parlee.
+
 ## Echo Remover
 Le calcul tourne dans un **Worker** (`echo-worker.js`) : l'interface reste
 fluide, et surtout le traitement n'est plus bride quand l'onglet passe en

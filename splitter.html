@@ -78,6 +78,14 @@
       <small class="hint" id="engineNote"></small>
     </div>
     <div class="control">
+      <label for="outputFmt">Format de sortie</label>
+      <select id="outputFmt">
+        <option value="720x1296@30" selected>Portrait 720×1296 · 30 fps (réseaux sociaux)</option>
+        <option value="source">Conserver la source</option>
+      </select>
+      <small class="hint">La vidéo est <b>convertie avant le découpage</b> : mise à l'échelle « remplir » puis rognage centré (paysage → portrait sans déformation). « Conserver la source » garde la résolution et la cadence d'origine.</small>
+    </div>
+    <div class="control">
       <label>Qualité vidéo <b id="crfVal">Équilibrée</b></label>
       <input type="range" id="crf" min="18" max="30" step="1" value="23">
     </div>
