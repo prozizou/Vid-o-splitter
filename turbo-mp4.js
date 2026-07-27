@@ -135,6 +135,25 @@ function audioDescription(mp4file, trackId, sampleRate, channels) {
   return new Uint8Array([b0, b1]);
 }
 
+/**
+ * Débit audio DÉCLARÉ par la source, en bits/s (0 si inconnu).
+ *
+ * Lu dans le DecoderConfigDescriptor de l'esds (`avgBitrate`, sinon
+ * `maxBitrate`). Sert à ré-encoder la voix au MÊME débit que l'original plutôt
+ * qu'à une valeur imposée : un encodage AAC en tandem à un débit différent de
+ * la source colore le timbre (« voix robotique »). Mieux vaut coller au débit
+ * de départ. Renvoie 0 si l'esds est absent ou ne le renseigne pas — l'appelant
+ * choisit alors un repli.
+ */
+function audioBitrate(mp4file, trackId) {
+  try {
+    const dcd = mp4file.getTrackById(trackId)
+      .mdia.minf.stbl.stsd.entries[0].esds.esd.descs[0];
+    const b = dcd.avgBitrate || dcd.maxBitrate || 0;
+    return Number.isFinite(b) && b > 0 ? b : 0;
+  } catch { return 0; }
+}
+
 // ==================== FLUX D'ÉCHANTILLONS ====================
 // Lit le fichier par tranches de 4 Mo et livre les échantillons dans l'ordre.
 // La lecture se met en pause dès que la file d'attente est pleine : la mémoire
@@ -222,4 +241,4 @@ async function createSampleStream(file, MP4Box, wanted) {
   }
 }
 
-export { loadMP4Box, loadMuxer, videoDescription, audioDescription, createSampleStream };
+export { loadMP4Box, loadMuxer, videoDescription, audioDescription, audioBitrate, createSampleStream };
