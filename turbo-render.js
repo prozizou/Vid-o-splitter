@@ -347,6 +347,11 @@ async function renderAllOnce(file, parts, opts, cb, accel) {
 
     // Morceaux audio conservés, un tableau par canal
     const pieces = aT ? Array.from({ length: aCH }, () => []) : null;
+    // A quel segment CONSERVE (entree de `map`) appartient chaque morceau,
+    // indices alignes avec pieces[0]/pieces[1]/... (un push par canal se fait
+    // toujours en lockstep, voir grabAudio). Sert a ne fondre qu'aux VRAIS
+    // raccords, voir le commentaire pres du fondu plus bas.
+    const pieceSeg = aT ? [] : null;
     // Tampons réutilisés : sans eux on allouait un Float32Array par canal ET
     // par segment chevauchant, dans la boucle audio la plus chaude du moteur.
     const scratch = [];
@@ -407,6 +412,7 @@ async function renderAllOnce(file, parts, opts, cb, accel) {
           const to = Math.min(n, Math.round(((e - ts) / US) * aSR));
           if (to <= from) continue;
           for (let c = 0; c < aCH; c++) pieces[c].push(scratch[c].slice(from, to));
+          pieceSeg.push(m);
           audioSamples += to - from;
         }
       } finally {
@@ -497,10 +503,32 @@ async function renderAllOnce(file, parts, opts, cb, accel) {
     // --- Audio : fondus, égaliseur, encodage -----------------------
     if (aT && pieces[0].length) {
       const fade = Math.max(1, Math.round((opts.audioFadeSec || 0.008) * aSR));
-      for (const chan of pieces) {
-        for (const p of chan) {
+      // VOIX ROBOTIQUE — un paquet du décodeur (~1024 échantillons, ~21 ms à
+      // 48 kHz) ne couvre presque jamais tout un segment conservé : un segment
+      // de plusieurs secondes traverse donc des dizaines de paquets, et
+      // `pieces[c]` contient UN MORCEAU PAR PAQUET, pas un morceau par segment.
+      // Fondre CHAQUE morceau (comme le faisait le code précédent) appliquait
+      // le fondu anti-clic de 8 ms en fondu ET en sortie de CHAQUE PAQUET, y
+      // compris à l'intérieur d'un segment parfaitement continu : ça produit
+      // une modulation d'amplitude périodique (grosso modo toutes les 21 ms)
+      // sur toute la durée conservée — le genre d'artefact qui s'entend comme
+      // une voix « robotique / métallique », constante, indépendante du débit
+      // ou du profil AAC. Le fondu ne doit s'appliquer qu'aux VRAIS raccords :
+      // le DÉBUT du premier morceau d'un segment (fade-in) et la FIN du
+      // dernier morceau de ce même segment (fade-out) — jamais aux morceaux
+      // intermédiaires, qui sont juste des découpes arbitraires du flux décodé
+      // à l'intérieur d'un segment continu.
+      const N = pieces[0].length;
+      for (let idx = 0; idx < N; idx++) {
+        const seg = pieceSeg[idx];
+        const isFirst = idx === 0 || pieceSeg[idx - 1] !== seg;
+        const isLast = idx === N - 1 || pieceSeg[idx + 1] !== seg;
+        if (!isFirst && !isLast) continue;
+        for (const chan of pieces) {
+          const p = chan[idx];
           const f = Math.min(fade, p.length >> 1);
-          for (let i = 0; i < f; i++) { p[i] *= i / f; p[p.length - 1 - i] *= i / f; }
+          if (isFirst) for (let i = 0; i < f; i++) p[i] *= i / f;
+          if (isLast) for (let i = 0; i < f; i++) p[p.length - 1 - i] *= i / f;
         }
       }
       let channels = pieces.map(chan => {
@@ -510,6 +538,7 @@ async function renderAllOnce(file, parts, opts, cb, accel) {
         return out;
       });
       pieces.forEach(c => (c.length = 0));
+      pieceSeg.length = 0;
       channels = await applyEQ(channels, aSR, opts.eq);
 
       // Le son de transition passe APRÈS l'égaliseur : il n'est pas coloré.
