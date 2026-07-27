@@ -466,6 +466,20 @@ export function nearestStdFps(fps) {
 const MAX_FPS = 30;
 
 /**
+ * Arrondit une dimension au multiple de 16 INFERIEUR, plancher a 16.
+ *
+ * Beaucoup d'encodeurs H.264 MATERIELS (Android/MediaCodec en tete) exigent
+ * des dimensions multiples de 16 : une resolution native de telephone en
+ * portrait (1080×2436, par exemple) ne l'est presque jamais. On rogne vers le
+ * BAS plutot que de padder vers le haut : un rognage de quelques pixels
+ * (moins de 16, invisible) ne fait que retirer un peu de contenu existant, un
+ * agrandissement inventerait une bordure noire a la place.
+ */
+export function align16(n) {
+  return Math.max(16, Math.floor(n / 16) * 16);
+}
+
+/**
  * Choisit une configuration d'encodeur H.264 supportée.
  *
  * Repli SILENCIEUX a dessein detecte par l'appelant, pas ici : quand AUCUN
@@ -563,6 +577,13 @@ async function renderAllOnce(file, parts, opts, cb, accel) {
 
   const W = vT.track_width || vT.video.width;
   const H = vT.track_height || vT.video.height;
+  // `VideoEncoder.isConfigSupported` peut repondre « supported » sans
+  // verifier l'alignement sur 16 exige par beaucoup d'encodeurs MATERIELS
+  // (Android/MediaCodec en tete) : l'echec ne se produit qu'AU RENDU, avec un
+  // laconique « Encoding error » — turboRenderAll le rattrape (repli
+  // logiciel), mais on perd l'acceleration materielle pour rien. Voir align16().
+  const encW = align16(W), encH = align16(H);
+  const needsCrop = encW !== W || encH !== H;
   const srcFps = Math.max(1, Math.round((vT.nb_samples * vT.timescale) / vT.duration)) || 30;
   const fps = Math.min(srcFps, MAX_FPS);
   // > 0 : les images en trop sont ignorees dans emit(), voir MAX_FPS.
@@ -570,16 +591,20 @@ async function renderAllOnce(file, parts, opts, cb, accel) {
 
   const vDesc = videoDescription(stream.mp4, vT.id, MP4Box);
   if (!vDesc) throw new Error("Codec vidéo non pris en charge par le moteur turbo.");
-  const { config: encCfg, downgraded } = await pickVideoConfig(W, H, fps, opts.crf, accel);
+  const { config: encCfg, downgraded } = await pickVideoConfig(encW, encH, fps, opts.crf, accel);
   if (cb.onLog) {
     const capNote = minFrameGapUs > 0
       ? ` (cadence source ${srcFps}fps plafonnée à ${MAX_FPS}fps : une image sur ${Math.round(srcFps / MAX_FPS)} environ est ignorée)`
       : '';
     const roundNote = encCfg.framerate !== fps ? ` — cadence ${fps}fps arrondie à ${encCfg.framerate}fps pour le matériel` : '';
+    // Sur l'echec, encW/encH SONT deja la resolution tentee : inutile de le
+    // repeter avec cropNote, qui ne sert qu'a expliquer pourquoi elle differe
+    // de la resolution source dans le message de succes.
+    const cropNote = needsCrop ? ` (source ${W}×${H}, rognée à un multiple de 16 requis par le matériel)` : '';
     cb.onLog(downgraded
-      ? `⚠️ Pas d'encodeur matériel pour ${W}×${H}@${fps}fps sur cet appareil : ` +
+      ? `⚠️ Pas d'encodeur matériel pour ${encW}×${encH}@${fps}fps sur cet appareil : ` +
         `repli sur un encodeur logiciel (${encCfg.codec}).${capNote} Le rendu sera nettement plus lent.`
-      : `🎞️ Encodeur : ${encCfg.codec} (${encCfg.hardwareAcceleration}), ${W}×${H}@${encCfg.framerate}fps${roundNote}${capNote}.`);
+      : `🎞️ Encodeur : ${encCfg.codec} (${encCfg.hardwareAcceleration}), ${encW}×${encH}@${encCfg.framerate}fps${roundNote}${capNote}${cropNote}.`);
   }
 
   const aSR = aT ? aT.audio.sample_rate : 0;
@@ -661,11 +686,12 @@ async function renderAllOnce(file, parts, opts, cb, accel) {
 
   let processedSec = 0;
 
-  // Toile hors écran : sert uniquement à assombrir les images du fondu.
+  // Toile hors écran : assombrit les images du fondu, et/ou rogne au multiple
+  // de 16 exigé par le matériel (voir encW/encH plus haut).
   const fadeUs = Math.round((opts.videoFadeSec || 0) * US);
   let canvas = null, ctx2d = null;
-  if (fadeUs > 0) {
-    canvas = new OffscreenCanvas(W, H);
+  if (fadeUs > 0 || needsCrop) {
+    canvas = new OffscreenCanvas(encW, encH);
     ctx2d = canvas.getContext('2d', { alpha: false });
   }
 
@@ -699,7 +725,7 @@ async function renderAllOnce(file, parts, opts, cb, accel) {
     const target = new ArrayBufferTarget();
     const muxer = new Muxer({
       target,
-      video: { codec: 'avc', width: W, height: H },
+      video: { codec: 'avc', width: encW, height: encH },
       audio: aT ? { codec: 'aac', numberOfChannels: aCH, sampleRate: aSR } : undefined,
       fastStart: 'in-memory',
       // La toute premiere image d'une partie ne tombe presque jamais pile sur
@@ -756,9 +782,15 @@ async function renderAllOnce(file, parts, opts, cb, accel) {
       if (alpha < 0.999) {
         ctx2d.globalAlpha = 1;
         ctx2d.fillStyle = '#000';
-        ctx2d.fillRect(0, 0, W, H);
+        ctx2d.fillRect(0, 0, encW, encH);
         ctx2d.globalAlpha = alpha;
-        ctx2d.drawImage(frame, 0, 0, W, H);
+        // Forme a 9 arguments : rogne la source a encW×encH SANS la redimensionner
+        // (un rognage de quelques px, pas un etirement). No-op si needsCrop est
+        // faux : encW/encH valent alors W/H, donc la source entiere est copiee.
+        ctx2d.drawImage(frame, 0, 0, encW, encH, 0, 0, encW, encH);
+        out = new VideoFrame(canvas, { timestamp: outTs, duration: dur });
+      } else if (needsCrop) {
+        ctx2d.drawImage(frame, 0, 0, encW, encH, 0, 0, encW, encH);
         out = new VideoFrame(canvas, { timestamp: outTs, duration: dur });
       } else {
         out = new VideoFrame(frame, { timestamp: outTs, duration: dur });
