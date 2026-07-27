@@ -2,7 +2,7 @@
 // un /vendor incomplet (build partiel) faisait échouer le chargement du module
 // entier — donc la page entière, moteur turbo compris. Il est chargé à la
 // demande dans getFFmpeg().
-import { turboSupported, turboAnalyze, turboRenderAll, turboJoin, turboMerge } from './turbo.js';
+import { turboSupported, turboAnalyze, turboRenderAll, turboJoin, turboMerge, WHINE_NOTCHES } from './turbo.js';
 import { SFX_TYPES, makeBedWav } from './sfx.js';
 import { segmentsFromLoud, thresholdCurve, planChunks, loudFromPCM } from './silence.js';
 import { fmtSize, fmtTime, probeDuration, attachLogTools } from './media.js';
@@ -82,6 +82,12 @@ const EQ = {
   highpass: false,
   normalize: false,
   linear: false,
+  // Sifflement electronique stable (~6,9 kHz / ~8,4 kHz) que certains
+  // telephones injectent dans leurs propres enregistrements d'ecran, sous
+  // charge CPU/GPU soutenue — capte par le micro, independant du contenu.
+  // Case a part, PAS liee aux presets : ne concerne que les appareils
+  // touches, contrairement aux reglages de timbre ci-dessus.
+  whineNotch: false,
 };
 
 // ==================== DOM ====================
@@ -402,6 +408,7 @@ refreshEngine();
 // --- Égaliseur ---
 const eqPreset = $('eqPreset'), eqBands = $('eqBands'), eqTag = $('eqTag');
 const eqHighpass = $('eqHighpass'), eqNormalize = $('eqNormalize'), eqLinear = $('eqLinear');
+const eqWhineNotch = $('eqWhineNotch');
 
 const fmtHz = f => (f >= 1000 ? `${f / 1000} kHz` : `${f} Hz`);
 EQ_FREQS.forEach((f, i) => {
@@ -421,8 +428,9 @@ function paintEQ() {
   eqHighpass.checked = EQ.highpass;
   eqNormalize.checked = EQ.normalize;
   eqLinear.checked = EQ.linear;
+  eqWhineNotch.checked = EQ.whineNotch;
   eqPreset.value = EQ.preset;
-  const active = EQ.gains.some(g => g !== 0) || EQ.highpass || EQ.normalize;
+  const active = EQ.gains.some(g => g !== 0) || EQ.highpass || EQ.normalize || EQ.whineNotch;
   eqTag.textContent = active ? (eqPreset.selectedOptions[0]?.textContent.split(' (')[0] || 'Actif') : 'Neutre';
   eqTag.classList.toggle('tag-on', active);
 }
@@ -446,6 +454,9 @@ eqBands.addEventListener('input', e => {
 eqHighpass.addEventListener('change', () => { EQ.highpass = eqHighpass.checked; EQ.preset = 'custom'; paintEQ(); });
 eqNormalize.addEventListener('change', () => { EQ.normalize = eqNormalize.checked; EQ.preset = 'custom'; paintEQ(); });
 eqLinear.addEventListener('change', () => { EQ.linear = eqLinear.checked; });
+// Pas de EQ.preset = 'custom' ici : comme eqLinear, c'est un reglage
+// independant du timbre choisi, pas une modification du preset.
+eqWhineNotch.addEventListener('change', () => { EQ.whineNotch = eqWhineNotch.checked; paintEQ(); });
 $('eqReset').addEventListener('click', () => applyPreset('flat'));
 paintEQ();
 
@@ -453,6 +464,11 @@ paintEQ();
 function audioChain(linear) {
   const f = [];
   if (EQ.highpass) f.push('highpass=f=85');
+  // Avant l'egaliseur/dynaudnorm : meme raison que dans turbo.js applyEQ,
+  // inutile de laisser un normaliseur amplifier un sifflement qu'on retire.
+  if (EQ.whineNotch) {
+    WHINE_NOTCHES.forEach(({ freq, q }) => f.push(`bandreject=f=${freq}:width_type=q:w=${q}`));
+  }
   const active = EQ_FREQS.map((freq, i) => ({ freq, g: EQ.gains[i] })).filter(b => b.g !== 0);
   if (active.length) {
     if (linear) {
@@ -1252,7 +1268,7 @@ processBtn.addEventListener('click', async () => {
           audioFadeSec: CONFIG.audioFadeSec,
           videoFadeSec: CONFIG.videoFadeSec,
           sfx: { type: CONFIG.sfxType, gainDb: CONFIG.sfxGainDb },
-          eq: { freqs: EQ_FREQS, gains: EQ.gains, q: EQ.q, highpass: EQ.highpass, normalize: EQ.normalize },
+          eq: { freqs: EQ_FREQS, gains: EQ.gains, q: EQ.q, highpass: EQ.highpass, normalize: EQ.normalize, whineNotch: EQ.whineNotch },
         }, {
           onLog: log,          // diagnostics par partie (images, durée d'audio)
           shouldStop: () => paused,

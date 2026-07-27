@@ -388,10 +388,26 @@ export async function turboAnalyze(file, windowSec, onProgress) {
   return { loud: Float32Array.from(loud), winSec: win / sr, duration };
 }
 
+// Deux sifflements electroniques stables, mesures par analyse spectrale sur
+// un enregistrement d'ecran reel : le telephone sous charge soutenue (CPU/GPU
+// qui tournent en continu pour capturer l'ecran) genere une interference
+// electrique captee par le micro integre, INDEPENDANTE du contenu — presente
+// meme dans les silences, a frequence fixe (verifie stable a +/-2% sur 5 min
+// de flux). Rien a voir avec le decoupage/reencodage : c'est deja dans ce que
+// le micro a enregistre. Un Q de 8 donne une bande assez large pour suivre la
+// derive observee (+/- 200 Hz environ selon l'appareil) sans mordre sur la
+// voix, dont l'essentiel de l'energie reste bien en dessous de 6 kHz.
+// Exportee : app.js s'en sert aussi pour construire le filtre ffmpeg
+// equivalent (bandreject), utilise quand WebCodecs est absent du navigateur.
+export const WHINE_NOTCHES = [
+  { freq: 6930, q: 8 },
+  { freq: 8440, q: 8 },
+];
+
 // ==================== ÉGALISEUR (OfflineAudioContext) ====================
 // Filtres biquad natifs du navigateur : rapides et de bonne qualité.
 async function applyEQ(channels, sampleRate, eq) {
-  const active = eq.gains.some(g => g !== 0) || eq.highpass || eq.normalize;
+  const active = eq.gains.some(g => g !== 0) || eq.highpass || eq.normalize || eq.whineNotch;
   if (!active || !channels[0].length) return channels;
 
   const n = channels[0].length;
@@ -407,6 +423,16 @@ async function applyEQ(channels, sampleRate, eq) {
     const hp = ctx.createBiquadFilter();
     hp.type = 'highpass'; hp.frequency.value = 85; hp.Q.value = 0.7;
     node.connect(hp); node = hp;
+  }
+  // Avant l'egaliseur/le compresseur : inutile de laisser un eventuel
+  // compresseur amplifier un sifflement qu'on est de toute facon en train de
+  // retirer.
+  if (eq.whineNotch) {
+    for (const { freq, q } of WHINE_NOTCHES) {
+      const notch = ctx.createBiquadFilter();
+      notch.type = 'notch'; notch.frequency.value = freq; notch.Q.value = q;
+      node.connect(notch); node = notch;
+    }
   }
   eq.freqs.forEach((f, i) => {
     if (!eq.gains[i]) return;
