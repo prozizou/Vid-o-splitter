@@ -21,6 +21,15 @@ const CONFIG = {
   videoFadeSec:  0.06,   // fondu au noir de part et d'autre de chaque raccord
   sfxType:       'none', // son de transition (voir SFX_TYPES)
   sfxGainDb:     -18,    // volume du son de transition
+  outputMode:    '720x1296@30', // conversion appliquée AVANT le découpage (voir OUTPUT_PRESETS)
+};
+
+// Formats de sortie. La vidéo est convertie à ces dimensions/cadence AVANT que
+// les silences ne soient coupés (mise à l'échelle « remplir » puis rognage
+// centré, voir turbo.js). `null` = on garde la résolution/cadence source.
+const OUTPUT_PRESETS = {
+  'source':      null,
+  '720x1296@30': { width: 720, height: 1296, fps: 30 },
 };
 
 const ANALYSIS_SR       = 8000; // Hz : piste mono basse fréquence pour l'analyse
@@ -331,6 +340,13 @@ bind('crf',  'crfVal',  v => {
 const chunkSel = $('chunk');
 chunkSel.addEventListener('change', () => { CONFIG.chunkMode = chunkSel.value; queueCutsRefresh(); });
 CONFIG.chunkMode = chunkSel.value;
+
+// --- Format de sortie (conversion avant découpage) ---
+const outputSel = $('outputFmt');
+if (outputSel) {
+  outputSel.addEventListener('change', () => { CONFIG.outputMode = outputSel.value; });
+  CONFIG.outputMode = outputSel.value;
+}
 
 // --- Transitions ---
 const fadeSel = $('fade'), fadeVal = $('fadeVal');
@@ -1265,6 +1281,7 @@ processBtn.addEventListener('click', async () => {
       try {
         await turboRenderAll(videoFile, job.chunks, {
           crf: CONFIG.crf,
+          output: OUTPUT_PRESETS[CONFIG.outputMode] || null,
           audioFadeSec: CONFIG.audioFadeSec,
           videoFadeSec: CONFIG.videoFadeSec,
           sfx: { type: CONFIG.sfxType, gainDb: CONFIG.sfxGainDb },
