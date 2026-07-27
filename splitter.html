@@ -78,12 +78,17 @@
       <small class="hint" id="engineNote"></small>
     </div>
     <div class="control">
-      <label for="outputFmt">Format de sortie</label>
-      <select id="outputFmt">
-        <option value="720x1296@30" selected>Portrait 720×1296 · 30 fps (réseaux sociaux)</option>
+      <label for="socialPreset">Réseau social visé</label>
+      <select id="socialPreset">
+        <option value="tiktok" selected>TikTok</option>
+        <option value="reels">Instagram / Facebook Reels</option>
+        <option value="shorts">YouTube Shorts</option>
+        <option value="whatsapp">WhatsApp (statut / message)</option>
+        <option value="facebook">Facebook (publication horizontale)</option>
         <option value="source">Conserver la source</option>
       </select>
-      <small class="hint">La vidéo est <b>convertie avant le découpage</b> : mise à l'échelle « remplir » puis rognage centré (paysage → portrait sans déformation). « Conserver la source » garde la résolution et la cadence d'origine.</small>
+      <small class="hint" id="socialHint"></small>
+      <small class="hint" id="sizeEstimate"></small>
     </div>
     <div class="control">
       <label>Qualité vidéo <b id="crfVal">Équilibrée</b></label>
@@ -168,7 +173,15 @@
   <section class="parts hidden" id="partsSection">
     <h2>Parties <span class="tag" id="partsTag">0/0</span></h2>
     <div id="partsList"></div>
-    <button class="btn hidden" id="joinBtn" disabled>🧩 Réunir toutes les parties</button>
+    <small class="hint">La vidéo finale est assemblée <b>automatiquement</b> dès que toutes les parties sont prêtes.</small>
+  </section>
+
+  <section class="final-info hidden" id="finalInfoSection">
+    <div class="cuts-head">
+      <b>📦 Rendu final</b>
+      <span class="tag" id="finalSizeTag">—</span>
+    </div>
+    <div id="finalInfoBody"></div>
   </section>
 
   <video id="preview" class="preview hidden" controls playsinline preload="metadata"></video>
