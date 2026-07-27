@@ -781,7 +781,24 @@ async function renderAllOnce(file, parts, opts, cb, accel) {
       sink.check();                                  // erreur d'un codec ou du muxer
       const s = item.s;
       const ts = usOf(s.cts, s.timescale);
-      if (ts >= endUs && item.id === vT.id) break;   // la partie suivante commence
+      // On decide la fin d'une partie sur la piste VIDEO. Mais dans un MP4 non
+      // entrelace — toutes les images video ecrites AVANT tout l'audio, mise en
+      // page produite par certains enregistreurs d'ecran / applis Android —
+      // l'audio de la partie arrive APRES sa derniere image dans le flux. Rompre
+      // sur la video laissait alors l'audio ENTIER non lu : le decodeur audio
+      // n'etait jamais alimente, grabAudio ne tournait pas, et la partie sortait
+      // muette (« aucun échantillon récupéré ») avant de retomber sur ffmpeg.
+      //
+      // Sur la DERNIERE partie, plus rien en aval n'a besoin du flux : on le lit
+      // donc jusqu'au bout pour recuperer cet audio en retard. Passe endUs il n'y
+      // a plus de segment conserve (silence final), donc aucune image n'est
+      // « needed » : rien n'est redecode, on ne fait que draîner l'audio.
+      //
+      // Sur une partie NON finale, il FAUT s'arreter au raccord : les echantillons
+      // suivants (video comme audio) appartiennent aux parties d'apres, qui
+      // reprennent le flux la ou on l'a laisse. Un fichier non entrelace decoupe
+      // en plusieurs parties reste ainsi confie a ffmpeg via ce meme garde-fou.
+      if (ts >= endUs && item.id === vT.id && !isLast) break;
       await stream.take();
 
       if (item.id === vT.id) {
