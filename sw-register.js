@@ -26,7 +26,12 @@ function showBuildTag() {
   tag.className = 'build-tag';
   tag.textContent = BUILD.startsWith('__') ? 'version : dev' : `version ${BUILD}`;
   tag.title = 'Version réellement chargée dans ce navigateur';
-  document.body.appendChild(tag);
+  // Dans `.container`, PAS dans `<body>` : body est un conteneur flex (rangée),
+  // donc un enfant direct de body devient un frère de `.container` posé dans une
+  // gouttière à droite — il grignotait la largeur de la carte sur téléphone.
+  // Placée dans la carte, la pastille reprend sa place « en bas de page »,
+  // centrée (voir .build-tag : margin auto + text-align center).
+  (document.querySelector('.container') || document.body).appendChild(tag);
 }
 
 function showUpdateBanner(reg) {

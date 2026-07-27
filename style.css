@@ -340,9 +340,58 @@ textarea:focus-visible { outline: 2px solid #38bdf8; outline-offset: 2px; }
   }
 }
 
+/* ==================== RESPONSIVE ==================== */
+/* La base est déjà pensée mobile-first (unités fluides, largeurs en %). Ces
+   requêtes n'affinent que les extrêmes : plein écran resserré sur téléphone,
+   largeur bornée au-delà. Aucune page n'a de mise en page propre — tout passe
+   par `.container`, donc ces règles valent pour les cinq outils à la fois. */
+
 /* Écrans larges : l'application reste lisible sans s'étirer à l'infini. */
 @media (min-width: 900px) {
   .cuts-canvas { height: 160px; object-fit: fill; }
+}
+
+/* Téléphones : la carte devient un shell plein écran. On récupère chaque pixel
+   de largeur pour les contrôles et l'égaliseur, on resserre les marges, et on
+   respecte l'encoche (safe-area) en bas comme sur les côtés. */
+@media (max-width: 600px) {
+  body { padding: 0; }
+  .container {
+    width: 100%;
+    min-height: 100vh;
+    border-radius: 0;
+    box-shadow: none;
+    padding: 1.4rem
+             max(1rem, env(safe-area-inset-right))
+             calc(1.4rem + env(safe-area-inset-bottom))
+             max(1rem, env(safe-area-inset-left));
+  }
+  h1 { font-size: 1.55rem; }
+  .subtitle { font-size: .9rem; margin-bottom: 1.25rem; }
+  .drop-zone { padding: 1.5rem .8rem; }
+  .controls { padding: .85rem .9rem; }
+  .panel { padding: .75rem .8rem; }
+}
+
+/* Très petits écrans (≈ 320 px) : on réduit encore le titre et la largeur mini
+   d'une bande d'égaliseur, pour que les 7 bandes tiennent sans défilement. */
+@media (max-width: 360px) {
+  .container {
+    padding: 1.1rem .75rem calc(1.1rem + env(safe-area-inset-bottom));
+  }
+  h1 { font-size: 1.4rem; }
+  .drop-zone { padding: 1.25rem .6rem; font-size: .95rem; }
+  .eq-band { min-width: 34px; }
+  .eq-slider { height: 84px; }
+}
+
+/* Paysage court (téléphone couché) : on rend le haut compact pour laisser la
+   place aux contrôles et à l'aperçu vidéo sans scroll interminable. */
+@media (max-height: 480px) and (orientation: landscape) {
+  body { padding: 0; }
+  .container { min-height: 100vh; border-radius: 0; padding: 1rem 1.25rem; }
+  .subtitle { margin-bottom: .75rem; }
+  .preview { max-height: 80vh; }
 }
 
 /* ==================== OUTILS DU JOURNAL ==================== */
