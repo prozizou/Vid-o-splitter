@@ -507,6 +507,24 @@ async function pickVideoConfig(w, h, fps, crf, accel = 'prefer-hardware') {
     width: w, height: h,
     bitrate: bitrateFor(w, h, fps, crf),
     avc: { format: 'avc' },
+    // Un profil High (avc1.640033, notre 1er candidat) autorise les images B,
+    // que certains encodeurs MATERIELS utilisent par defaut pour la
+    // compression. Une image B se decode APRES des images qui la suivent a
+    // l'ecran : l'encodeur doit alors emettre ses paquets dans un ordre de
+    // DECODAGE distinct de l'ordre de PRESENTATION. `mp4-muxer` (addVideoChunk)
+    // suppose au contraire un flux SANS reordonnancement, et rejette tout
+    // paquet dont l'horodatage recule :
+    //   Timestamps must be monotonically increasing (DTS went from X to Y)
+    // 'realtime' est le mecanisme standard WebCodecs pour desactiver le
+    // fenetrage/reordonnancement en B : chaque trame ressort dans l'ordre ou
+    // elle a ete soumise. Cout : une compression legerement moins efficace, un
+    // echange largement justifie face a l'echec observe — une erreur de
+    // MULTIPLEXAGE, pas de decodage/encodage, donc turboRenderAll() ne la
+    // reconnaissait meme pas comme un probleme de codec : `dejaFait || !codec`
+    // rejetait aussitot l'erreur SANS tenter le repli logiciel. Le message
+    // « ⚠️ Codec matériel en échec » n'apparaissait donc jamais ; seul
+    // « ⚠️ Moteur turbo interrompu » remontait, en echec sec.
+    latencyMode: 'realtime',
   };
   const stdFps = nearestStdFps(fps);
   // 1) frequence source telle quelle ; 2) meme materiel mais frequence
