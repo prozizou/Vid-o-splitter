@@ -124,4 +124,4 @@ async function pickVideoConfig(w, h, fps, crf, accel = 'prefer-hardware') {
   throw new Error("Aucun encodeur H.264 disponible sur cet appareil.");
 }
 
-export { MAX_FPS, pickVideoConfig };
+export { MAX_FPS, pickVideoConfig, bitrateFor };

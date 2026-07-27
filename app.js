@@ -2,7 +2,7 @@
 // un /vendor incomplet (build partiel) faisait échouer le chargement du module
 // entier — donc la page entière, moteur turbo compris. Il est chargé à la
 // demande dans getFFmpeg().
-import { turboSupported, turboAnalyze, turboRenderAll, turboJoin, turboMerge, WHINE_NOTCHES } from './turbo.js';
+import { turboSupported, turboAnalyze, turboRenderAll, turboJoin, turboMerge, WHINE_NOTCHES, bitrateFor, align16 } from './turbo.js';
 import { SFX_TYPES, makeBedWav } from './sfx.js';
 import { segmentsFromLoud, thresholdCurve, planChunks, loudFromPCM } from './silence.js';
 import { fmtSize, fmtTime, probeDuration, attachLogTools } from './media.js';
@@ -16,20 +16,72 @@ const CONFIG = {
   sensitivity:   1.0,    // multiplicateur du seuil adaptatif
   audioFadeSec:  0.008,  // micro-fondu anti-clic à chaque raccord
   absFloor:      0.004,  // plancher d'amplitude absolu
-  crf:           23,     // qualité vidéo : bas = meilleure qualité
+  crf:           23,     // qualité vidéo : bas = meilleure qualité (ajustée par le préréglage réseau social, voir SOCIAL_PRESETS)
   chunkMode:     'auto', // 'auto' | 'off' | durée d'une partie en secondes
   videoFadeSec:  0.06,   // fondu au noir de part et d'autre de chaque raccord
   sfxType:       'none', // son de transition (voir SFX_TYPES)
   sfxGainDb:     -18,    // volume du son de transition
-  outputMode:    '720x1296@30', // conversion appliquée AVANT le découpage (voir OUTPUT_PRESETS)
+  socialPreset:  'tiktok', // réseau social visé (voir SOCIAL_PRESETS) : pilote la conversion ET la qualité suggérée
 };
 
-// Formats de sortie. La vidéo est convertie à ces dimensions/cadence AVANT que
-// les silences ne soient coupés (mise à l'échelle « remplir » puis rognage
-// centré, voir turbo.js). `null` = on garde la résolution/cadence source.
-const OUTPUT_PRESETS = {
-  'source':      null,
-  '720x1296@30': { width: 720, height: 1296, fps: 30 },
+// Préréglages réseaux sociaux. La vidéo est convertie à ces dimensions/cadence
+// AVANT que les silences ne soient coupés (mise à l'échelle « remplir » puis
+// rognage centré, voir turbo-render.js). `output: null` = on garde la
+// résolution/cadence source. `crf` est une suggestion appliquée au changement
+// de préréglage (l'utilisateur peut ensuite l'ajuster manuellement).
+// `maxSizeMB`/`maxDurationSec` sont indicatifs (non imposés par l'appli) : ils
+// servent uniquement à comparer le résultat final et à avertir si besoin —
+// les plateformes font évoluer ces limites, à prendre comme un ordre de
+// grandeur plutôt qu'une garantie.
+const SOCIAL_PRESETS = {
+  tiktok: {
+    label: 'TikTok',
+    output: { width: 1080, height: 1920, fps: 30 },
+    crf: 21,
+    maxSizeMB: null,
+    maxDurationSec: null,
+    hint: 'Vertical 9:16 plein cadre, qualité élevée : TikTok tolère de gros fichiers pour un clip court.',
+  },
+  reels: {
+    label: 'Instagram / Facebook Reels',
+    output: { width: 1080, height: 1920, fps: 30 },
+    crf: 22,
+    maxSizeMB: null,
+    maxDurationSec: 90,
+    hint: 'Vertical 9:16. Un Reel dépasse rarement ~90 s (repère indicatif, pas une limite imposée ici).',
+  },
+  shorts: {
+    label: 'YouTube Shorts',
+    output: { width: 1080, height: 1920, fps: 30 },
+    crf: 21,
+    maxSizeMB: null,
+    maxDurationSec: 180,
+    hint: 'Vertical 9:16. Un Short dépasse rarement 3 min (repère indicatif, pas une limite imposée ici).',
+  },
+  whatsapp: {
+    label: 'WhatsApp (statut / message)',
+    output: { width: 720, height: 1280, fps: 30 },
+    crf: 26,
+    maxSizeMB: 16,
+    maxDurationSec: 30,
+    hint: 'Vertical 9:16, fichier volontairement compact : WhatsApp recompresse fortement au partage, autant lui donner un fichier déjà léger.',
+  },
+  facebook: {
+    label: 'Facebook (publication horizontale)',
+    output: { width: 1280, height: 720, fps: 30 },
+    crf: 23,
+    maxSizeMB: null,
+    maxDurationSec: null,
+    hint: 'Horizontal 16:9 classique pour le fil d\'actualité.',
+  },
+  source: {
+    label: 'Conserver la source',
+    output: null,
+    crf: null,   // ne modifie pas le réglage qualité en cours
+    maxSizeMB: null,
+    maxDurationSec: null,
+    hint: 'Résolution et cadence d\'origine : aucune conversion avant le découpage.',
+  },
 };
 
 const ANALYSIS_SR       = 8000; // Hz : piste mono basse fréquence pour l'analyse
@@ -102,12 +154,13 @@ const EQ = {
 // ==================== DOM ====================
 const $ = id => document.getElementById(id);
 const dropZone = $('dropZone'), fileInput = $('fileInput');
-const processBtn = $('processBtn'), pauseBtn = $('pauseBtn'), joinBtn = $('joinBtn');
+const processBtn = $('processBtn'), pauseBtn = $('pauseBtn');
 const statusDiv = $('status'), logOutput = $('logOutput');
 const progressContainer = $('progressContainer'), progressBar = $('progressBar');
 const progressMeta = $('progressMeta'), progressPct = $('progressPct');
 const progressPhase = $('progressPhase'), progressEta = $('progressEta');
 const partsSection = $('partsSection'), partsList = $('partsList'), partsTag = $('partsTag');
+const finalInfoSection = $('finalInfoSection'), finalInfoBody = $('finalInfoBody'), finalSizeTag = $('finalSizeTag');
 const preview = $('preview'), downloadLink = $('downloadLink');
 const resumeBanner = $('resumeBanner');
 const queueSection = $('queueSection'), queueList = $('queueList');
@@ -124,6 +177,7 @@ let usingMT = false;
 let canMount = false;
 let running = false;
 let paused = false;
+let finalizing = false;  // garde anti-réentrance de finalizeOutput(), distincte de `running`
 let job = null;          // { key, chunks: [...], duration }
 let engine = 'turbo';    // 'turbo' (WebCodecs) | 'compat' (ffmpeg.wasm)
 let finalURL = null;
@@ -313,6 +367,7 @@ async function saveJobMeta() {
   if (!job) return;
   await dbPut(META, 'job', {
     key: job.key, duration: job.duration,
+    socialPreset: job.socialPreset, crf: job.crf, engine: job.engine,
     chunks: job.chunks.map(c => ({ t0: c.t0, t1: c.t1, kept: c.kept, status: c.status === 'done' ? 'done' : 'pending' })),
   });
 }
@@ -330,22 +385,51 @@ const bind = (id, valId, fmt, key, affectsCuts = false) => {
 bind('sens', 'sensVal', v => `${(+v).toFixed(1)}×`, 'sensitivity', true);
 bind('sil',  'silVal',  v => `${(+v).toFixed(2)} s`, 'minSilenceDur', true);
 bind('pad',  'padVal',  v => `${(+v).toFixed(2)} s`, 'padding', true);
+// affectsCuts=true : la qualité vidéo ne change pas le découpage, mais la
+// taille de fichier ESTIMÉE affichée sous le sélecteur réseau social en
+// dépend — queueCutsRefresh() est le mécanisme déjà en place pour recalculer
+// sans surcoût perceptible (voir paintSizeEstimate(), appelée par refreshCuts()).
 bind('crf',  'crfVal',  v => {
   const n = +v;
   if (n <= 20) return 'Haute (fichier + gros)';
   if (n <= 25) return 'Équilibrée';
   return 'Légère (fichier + petit)';
-}, 'crf');
+}, 'crf', true);
+
+/** Fixe la qualité vidéo par programme (préréglage réseau social) en
+ * réutilisant EXACTEMENT la logique de bind('crf', ...) ci-dessus, plutôt que
+ * de dupliquer le formatage du libellé. */
+function setCrf(n) {
+  const el = $('crf');
+  el.value = String(n);
+  el.dispatchEvent(new Event('input'));
+}
 
 const chunkSel = $('chunk');
 chunkSel.addEventListener('change', () => { CONFIG.chunkMode = chunkSel.value; queueCutsRefresh(); });
 CONFIG.chunkMode = chunkSel.value;
 
-// --- Format de sortie (conversion avant découpage) ---
-const outputSel = $('outputFmt');
-if (outputSel) {
-  outputSel.addEventListener('change', () => { CONFIG.outputMode = outputSel.value; });
-  CONFIG.outputMode = outputSel.value;
+// --- Réseau social visé (conversion + qualité avant découpage) ---
+const socialSel = $('socialPreset'), socialHint = $('socialHint');
+function paintSocialHint() {
+  const preset = SOCIAL_PRESETS[CONFIG.socialPreset] || SOCIAL_PRESETS.source;
+  socialHint.textContent = preset.hint;
+}
+if (socialSel) {
+  socialSel.addEventListener('change', () => {
+    CONFIG.socialPreset = socialSel.value;
+    const preset = SOCIAL_PRESETS[CONFIG.socialPreset] || SOCIAL_PRESETS.source;
+    if (preset.crf != null) setCrf(preset.crf);
+    paintSocialHint();
+    queueCutsRefresh();
+  });
+  CONFIG.socialPreset = socialSel.value;
+  paintSocialHint();
+  // Applique la qualité suggérée par le préréglage sélectionné par défaut dans
+  // le HTML, pour que le curseur « Qualité vidéo » reflète ce préréglage dès
+  // le chargement plutôt que la valeur générique déclarée dans le markup.
+  const initialCrf = (SOCIAL_PRESETS[CONFIG.socialPreset] || SOCIAL_PRESETS.source).crf;
+  if (initialCrf != null) setCrf(initialCrf);
 }
 
 // --- Transitions ---
@@ -544,6 +628,7 @@ async function sourcesChanged() {
   videoFile = sourceFiles.length === 1 ? sourceFiles[0] : null;
   job = null;
   analysis = null;
+  sourceDims = null;   // dimensions sondées pour l'estimation : périmées si la source change
   cutsSection.classList.add('hidden');
   resetOutput();
   renderQueue();
@@ -717,7 +802,8 @@ function resetOutput() {
   downloadLink.classList.add('hidden');
   partsSection.classList.add('hidden');
   partsList.innerHTML = '';
-  joinBtn.classList.add('hidden');
+  finalInfoSection.classList.add('hidden');
+  finalInfoBody.innerHTML = '';
   showProgress(false);
 }
 
@@ -748,9 +834,24 @@ async function tryResume() {
     await dbWipe(); job = null; resetOutput(); resumeBanner.classList.add('hidden');
   });
 
-  job = { key: meta.key, duration: meta.duration, chunks };
+  job = {
+    key: meta.key, duration: meta.duration, chunks,
+    // Repli sur les réglages courants pour une sauvegarde antérieure à ces
+    // champs (absents de meta.* avant leur ajout).
+    socialPreset: meta.socialPreset || CONFIG.socialPreset,
+    crf: meta.crf ?? CONFIG.crf,
+    engine: meta.engine || engine,
+  };
   renderParts();
-  processBtn.textContent = `▶️ Reprendre (${chunks.length - doneCount} parties restantes)`;
+  if (doneCount === chunks.length) {
+    processBtn.textContent = '🔁 Retraiter la vidéo';
+    // Job entièrement terminé mais jamais assemblé (page rechargée avant la
+    // réunion, ou reprise d'une session ancienne) : on complète tout de suite,
+    // sans attendre un clic sur « Traiter ».
+    await finalizeOutput(true);
+  } else {
+    processBtn.textContent = `▶️ Reprendre (${chunks.length - doneCount} parties restantes)`;
+  }
 }
 
 // ==================== MOTEUR FFMPEG ====================
@@ -862,6 +963,39 @@ async function ensureAnalysis() {
   return analysis;
 }
 
+// ==================== ESTIMATION DE TAILLE (avant traitement) ====================
+// Dimensions sources sondées à la demande (pas de décodage complet), pour
+// estimer une taille de fichier quand « Conserver la source » est choisi.
+let sourceDims = null;
+async function ensureSourceDims() {
+  if (sourceDims || !sourceFiles.length) return sourceDims;
+  try { sourceDims = await probeSize(sourceFiles[0]); } catch { sourceDims = null; }
+  return sourceDims;
+}
+
+const AUDIO_BITRATE_ESTIMATE = 128_000; // débit audio typique d'une voix, pour l'estimation seulement
+
+/** Estimation grossière (avant traitement) de la taille du fichier final. */
+async function paintSizeEstimate(keptSec) {
+  const el = $('sizeEstimate');
+  if (!el) return;
+  const preset = SOCIAL_PRESETS[CONFIG.socialPreset] || SOCIAL_PRESETS.source;
+  let w, h, fps;
+  if (preset.output) {
+    ({ width: w, height: h, fps } = preset.output);
+  } else {
+    const dims = await ensureSourceDims();
+    w = dims ? dims.w : 1280; h = dims ? dims.h : 720; fps = 30;
+  }
+  const vBitrate = bitrateFor(align16(w), align16(h), fps, CONFIG.crf);
+  const bytes = ((vBitrate + AUDIO_BITRATE_ESTIMATE) / 8) * keptSec;
+  let note = ` ≈ ${fmtSize(bytes)} estimés (${align16(w)}×${align16(h)}@${fps}fps).`;
+  if (preset.maxSizeMB && bytes / 1048576 > preset.maxSizeMB) {
+    note += ` ⚠️ Dépasse le repère indicatif ${preset.label} (~${preset.maxSizeMB} Mo) : qualité vidéo plus légère conseillée.`;
+  }
+  el.textContent = note.trim();
+}
+
 /** Recalcule les segments à partir du cache et redessine. Ne décode rien. */
 function refreshCuts() {
   if (!analysis) return;
@@ -869,6 +1003,7 @@ function refreshCuts() {
   const { segments, kept } = segmentsFromLoud(loud, winSec, duration, silenceCfg());
   const parts = planChunks(segments, duration, chunkOpts());
   drawCuts(segments);
+  paintSizeEstimate(kept).catch(() => {});   // ne bloque jamais l'aperçu des coupes
 
   const removed = duration - kept;
   const pct = duration > 0 ? Math.round((removed / duration) * 100) : 0;
@@ -1204,12 +1339,6 @@ function updatePartRow(c) {
 function refreshPartsTag() {
   const done = job.chunks.filter(c => c.status === 'done').length;
   partsTag.textContent = `${done}/${job.chunks.length}`;
-  const all = done === job.chunks.length;
-  joinBtn.classList.toggle('hidden', !done);
-  joinBtn.disabled = !all || running;
-  joinBtn.textContent = all
-    ? '🧩 Réunir toutes les parties'
-    : `🧩 Réunir (${job.chunks.length - done} partie(s) manquante(s))`;
 }
 
 // ==================== FLUX PRINCIPAL ====================
@@ -1254,14 +1383,25 @@ processBtn.addEventListener('click', async () => {
         fresh.forEach((f, i) => { job.chunks[i].segs = f.segs; });
       } else {
         await dbWipe();
-        job = { key: currentKey(), duration, chunks: fresh };
+        // Réglages figés au moment où LE JOB EST CRÉÉ, pas relus depuis CONFIG
+        // à chaque appel : sinon changer le réseau social ou le CRF entre une
+        // pause et une reprise produirait des parties encodées avec des
+        // réglages différents dans un même fichier final.
+        job = {
+          key: currentKey(), duration, chunks: fresh,
+          socialPreset: CONFIG.socialPreset, crf: CONFIG.crf, engine,
+        };
       }
       await saveJobMeta();
       renderParts();
     }
 
     const todo = job.chunks.filter(c => c.status !== 'done');
-    if (!todo.length) { setStatus('✅ Toutes les parties sont déjà prêtes. Réunissez-les.'); return; }
+    if (!todo.length) {
+      setStatus('✅ Toutes les parties sont déjà prêtes.');
+      await finalizeOutput(false);
+      return;
+    }
 
     // --- 2. Traitement partie par partie ---------------------------
     clock = { start: performance.now(), doneSec: 0, totalSec: todo.reduce((a, c) => a + c.kept, 0), curSec: 0, curFrac: 0 };
@@ -1280,8 +1420,8 @@ processBtn.addEventListener('click', async () => {
     if (engine === 'turbo') {
       try {
         await turboRenderAll(videoFile, job.chunks, {
-          crf: CONFIG.crf,
-          output: OUTPUT_PRESETS[CONFIG.outputMode] || null,
+          crf: job.crf,
+          output: (SOCIAL_PRESETS[job.socialPreset] || SOCIAL_PRESETS.source).output,
           audioFadeSec: CONFIG.audioFadeSec,
           videoFadeSec: CONFIG.videoFadeSec,
           sfx: { type: CONFIG.sfxType, gainDb: CONFIG.sfxGainDb },
@@ -1340,8 +1480,13 @@ processBtn.addEventListener('click', async () => {
         // dire, plutôt que de laisser croire que c'est la vitesse attendue.
         if (x < 2) log(`ℹ️ Vitesse ${x.toFixed(1)}× : l'encodage n'a probablement pas été matériel.`);
       }
-      setStatus(`🎉 ${done}/${job.chunks.length} parties prêtes${speed}. Vérifiez les aperçus, puis réunissez-les.`);
-      notify('Traitement terminé', `${done} partie(s) prêtes à être réunies.`);
+      log(`✅ ${done}/${job.chunks.length} partie(s) prête(s)${speed}.`);
+      // Assemblage automatique : plus besoin d'un clic sur « Réunir les
+      // parties ». finalizeOutput() prend la main sur le statut affiché et
+      // notifie elle-même une fois la vidéo finale prête — une seule
+      // notification, plus pertinente que « parties prêtes » suivie aussitôt
+      // de « vidéo prête ».
+      await finalizeOutput(false);
     }
   } catch (err) {
     console.error(err);
@@ -1377,16 +1522,77 @@ pauseBtn.addEventListener('click', () => {
   setStatus('⏸️ Pause demandée : la partie en cours se termine…');
 });
 
-joinBtn.addEventListener('click', async () => {
-  if (!job || running) return;
-  const done = job.chunks.filter(c => c.status === 'done');
-  if (done.length !== job.chunks.length) return;
+// ==================== RENDU FINAL (assemblage automatique) ====================
+// Remplace l'ancien bouton manuel « Réunir toutes les parties » : dès que
+// toutes les parties d'un job sont prêtes, la vidéo finale est assemblée sans
+// action de l'utilisateur. Le cas à UNE seule partie (le plus courant : une
+// vidéo de moins de 20 min reste en une seule partie en moteur turbo) saute
+// même l'étape de réunion — cette partie unique EST déjà la vidéo finale.
 
-  running = true;
-  joinBtn.disabled = true; processBtn.disabled = true;
-  showProgress(true); setPhase(0, 1, 'Réunion des parties'); paintProgress(0);
+/** Détail des réglages + taille réelle, affichés une fois la vidéo assemblée. */
+function renderFinalInfo(blob, jobRef, keptSec) {
+  const preset = SOCIAL_PRESETS[jobRef.socialPreset] || SOCIAL_PRESETS.source;
+  const convertit = jobRef.engine === 'turbo' && preset.output;
+  const dims = convertit
+    ? { w: align16(preset.output.width), h: align16(preset.output.height), fps: preset.output.fps }
+    : null;
+
+  const rows = [
+    ['Réseau visé', escapeHtml(preset.label)],
+    ['Moteur', jobRef.engine === 'turbo' ? 'Turbo (WebCodecs)' : 'Compatible (ffmpeg)'],
+    dims
+      ? ['Résolution × cadence', `${dims.w}×${dims.h} @ ${dims.fps} fps`]
+      : ['Résolution × cadence', jobRef.engine === 'turbo'
+          ? 'Source conservée'
+          : 'Source conservée (conversion réseau social non appliquée par le moteur compatible)'],
+    ['Qualité vidéo (CRF)', String(jobRef.crf)],
+    ['Durée finale', fmtTime(keptSec)],
+    ['Taille du fichier', fmtSize(blob.size)],
+  ];
+  finalInfoBody.innerHTML = rows
+    .map(([k, v]) => `<div class="final-row"><span>${k}</span><b>${v}</b></div>`)
+    .join('');
+
+  let note = '';
+  if (preset.maxSizeMB) {
+    const sizeMB = blob.size / 1048576;
+    note = sizeMB <= preset.maxSizeMB
+      ? `✅ Sous le repère indicatif ${preset.label} (~${preset.maxSizeMB} Mo).`
+      : `⚠️ Dépasse le repère indicatif ${preset.label} (~${preset.maxSizeMB} Mo) : réduisez la qualité vidéo (CRF plus élevé) ou raccourcissez la vidéo.`;
+  }
+  if (preset.maxDurationSec && keptSec > preset.maxDurationSec) {
+    note += (note ? '<br>' : '') +
+      `ℹ️ ${fmtTime(keptSec)} dépasse le repère indicatif ${preset.label} (~${fmtTime(preset.maxDurationSec)}). ` +
+      `Le Splitter ne raccourcit que les silences, pas la durée totale.`;
+  }
+  if (note) finalInfoBody.innerHTML += `<small class="hint">${note}</small>`;
+
+  finalSizeTag.textContent = fmtSize(blob.size);
+  finalInfoSection.classList.remove('hidden');
+}
+
+/**
+ * Assemble toutes les parties prêtes en un seul fichier final.
+ * @param standalone  true si appelée HORS du flux principal (ex. reprise d'un
+ *   job déjà entièrement terminé) : gère alors elle-même running/processBtn.
+ * @returns vrai si un fichier final a été produit.
+ */
+async function finalizeOutput(standalone) {
+  // Garde dédiée, distincte de `running` : les appels NON autonomes viennent
+  // du flux principal, qui a DÉJÀ mis running=true avant d'arriver ici — un
+  // garde-fou sur `running` bloquerait alors systématiquement l'assemblage.
+  // `finalizing` protège seulement contre un appel réentrant sur cette
+  // fonction elle-même ; un appel autonome refuse en plus de démarrer si une
+  // autre opération (running) est déjà en cours.
+  if (!job || finalizing || (standalone && running)) return false;
+  const done = job.chunks.filter(c => c.status === 'done');
+  if (!done.length || done.length !== job.chunks.length) return false;
+
+  finalizing = true;
+  if (standalone) { running = true; processBtn.disabled = true; }
+  showProgress(true); setPhase(0, 1, 'Assemblage final'); paintProgress(0);
   clock = { start: 0, doneSec: 0, totalSec: 0, curSec: 0, curFrac: 0 };
-  setStatus('🧩 Réunion des parties (copie directe, sans réencodage)...');
+  setStatus('🧩 Assemblage de la vidéo finale (copie directe, sans réencodage)...');
   await keepAwake(true);
 
   let blobs = null;
@@ -1395,8 +1601,11 @@ joinBtn.addEventListener('click', async () => {
     blobs = [];
     for (const c of done) blobs.push(await loadPartBlob(c));
 
+    // Une seule partie : rien à réunir, c'est déjà la vidéo finale.
     let blob;
-    if (engine === 'turbo') {
+    if (blobs.length === 1) {
+      blob = blobs[0];
+    } else if (job.engine === 'turbo') {
       // Mode diagnostic : aucun repli vers ffmpeg ici non plus.
       blob = await turboJoin(blobs);
     } else {
@@ -1410,19 +1619,27 @@ joinBtn.addEventListener('click', async () => {
     finalURL = URL.createObjectURL(blob);
     preview.src = finalURL; preview.classList.remove('hidden'); preview.load();
     downloadLink.href = finalURL; downloadLink.classList.remove('hidden');
+    const keptSec = job.chunks.reduce((a, c) => a + c.kept, 0);
+    renderFinalInfo(blob, job, keptSec);
     setStatus(`🎉 Vidéo finale prête — ${fmtSize(blob.size)}.`);
     notify('Vidéo finale prête', `${fmtSize(blob.size)} — prête à enregistrer.`);
     preview.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    return true;
   } catch (err) {
     console.error(err);
-    setStatus('❌ Réunion impossible : ' + err.message + ' — vos parties restent enregistrables une par une.', 'err');
+    setStatus('❌ Assemblage impossible : ' + err.message + ' — vos parties restent enregistrables une par une.', 'err');
+    return false;
   } finally {
-    running = false;
-    processBtn.disabled = false;
+    finalizing = false;
+    if (standalone) {
+      running = false;
+      processBtn.disabled = false;
+      processBtn.textContent = '🔁 Retraiter la vidéo';
+    }
     refreshPartsTag();
     await keepAwake(false);
   }
-});
+}
 
 window.addEventListener('beforeunload', e => {
   if (running) { e.preventDefault(); e.returnValue = ''; }

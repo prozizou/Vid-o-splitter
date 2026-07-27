@@ -84,20 +84,52 @@ Audio cote turbo. Le rendu n'est donc pas identique au decibel pres entre les
 deux moteurs sur cette option precise. Les bandes de l'egaliseur, elles, sont
 equivalentes (biquad peaking de meme frequence, meme Q, meme gain).
 
-## Format de sortie (conversion)
+## Réseau social visé (conversion + qualité)
 
-Selecteur **Format de sortie** sur `/splitter`. Par defaut la video est
-**convertie en 720×1296 @ 30 im/s AVANT le decoupage** (cible verticale des
-reseaux sociaux). Choisir « Conserver la source » retablit l'ancien
-comportement (resolution et cadence d'origine, seul le rognage au multiple de
-16 exige par le materiel est applique).
+Sélecteur **Réseau social visé** sur `/splitter` : TikTok, Instagram/Facebook
+Reels, YouTube Shorts, WhatsApp (statut/message), Facebook (publication
+horizontale), ou « Conserver la source ». Chaque préréglage fixe la
+résolution/cadence cible **et** suggère une qualité vidéo (CRF) adaptée —
+WhatsApp recompressant fortement au partage, son préréglage vise un fichier
+plus compact ; TikTok tolère de gros fichiers, le sien vise une meilleure
+qualité. La qualité suggérée est appliquée au changement de préréglage, mais
+reste ajustable ensuite via le curseur « Qualité vidéo ».
 
 La conversion se fait EN MEME TEMPS que le rendu, en une seule passe : chaque
-image conservee est mise a l'echelle « remplir » (cover) sur la toile hors
-ecran deja utilisee pour les fondus, puis rognee au centre. Le rapport
-d'aspect est preserve — un plan paysage devient un portrait cadre au centre,
-sans deformation ni bandes noires. On ne sur-echantillonne jamais la cadence :
-viser 30 im/s plafonne a 30, une source plus lente reste a sa cadence.
+image conservée est mise à l'échelle « remplir » (cover) sur la toile hors
+écran déjà utilisée pour les fondus, puis rognée au centre. Le rapport
+d'aspect est préservé — un plan paysage devient un portrait cadré au centre,
+sans déformation ni bandes noires. On ne sur-échantillonne jamais la cadence :
+viser 30 im/s plafonne à 30, une source plus lente reste à sa cadence.
+« Conserver la source » retablit l'ancien comportement (résolution et cadence
+d'origine, seul le rognage au multiple de 16 exigé par le matériel s'applique).
+
+Une estimation de taille (« ≈ X Mo estimés… ») s'affiche sous le sélecteur dès
+qu'un aperçu des coupes a été calculé, et se met à jour en direct avec la
+qualité vidéo ou le préréglage — sans rien recalculer côté décodage. Elle
+avertit si la taille dépasse le repère indicatif du réseau visé (WhatsApp
+uniquement pour l'instant, seul repère de taille suffisamment stable pour être
+affiché ; les autres réseaux n'imposent pas de limite pratique à ces
+résolutions).
+
+## Rendu final : assemblage automatique
+
+L'ancien bouton **« Réunir toutes les parties »** a été retiré : dès que
+toutes les parties d'une vidéo sont prêtes, l'assemblage final se fait
+**automatiquement**, sans action de l'utilisateur (copie directe des flux déjà
+encodés, sans réencodage — comme avant). Le cas le plus courant (une vidéo de
+moins de 20 min turbo, une seule partie) saute même cette étape : la partie
+unique EST déjà la vidéo finale.
+
+Un encart **« Rendu final »** apparaît alors au-dessus de l'aperçu vidéo,
+détaillant le réseau visé, le moteur utilisé, la résolution/cadence
+réellement appliquée, la qualité vidéo, la durée et **la taille réelle du
+fichier** — avec le même avertissement de dépassement que l'estimation, cette
+fois basé sur la taille exacte.
+
+Une reprise de session (page rechargée) dont toutes les parties étaient déjà
+prêtes déclenche aussi cet assemblage automatique, sans qu'il soit nécessaire
+de recliquer sur « Traiter ».
 
 ## Voix : debit audio
 
