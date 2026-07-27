@@ -1,34 +1,35 @@
-# Studio Video — boite a outils 100 % locale (v6.2)
+# Studio Video — Splitter 100 % local (v6.2)
 
-Quatre outils dans une seule PWA. Aucun fichier ne quitte l'appareil.
+Un seul outil dans une PWA. Aucun fichier ne quitte l'appareil.
 
 | Page | Outil | Fichier |
 |---|---|---|
 | `/` | Menu d'accueil | `index.html` |
 | `/splitter` | **Splitter** — supprime les silences (moteur turbo WebCodecs) | `app.js` + `turbo.js` + `silence.js` |
-| `/echo` | **Echo Remover** — attenue l'echo / la reverberation d'une piece | `echo.js` + `echo-worker.js` |
-| `/studio` | **Audio Studio** — porte de bruit, EQ 7 bandes, compresseur, normalisation LUFS | `studio.js` + `loudness.js` |
-| `/lyrics` | **Lyrics** — synchronisation de paroles au toucher, export .lrc / .srt | `lyrics.js` |
 
 (Les URL n'ont pas d'extension : `cleanUrls` est actif sur Vercel.)
 
-`media.js` est la boite a outils partagee : decodage audio universel (fichiers
-audio OU video), export WAV, conversion M4A, reinjection de l'audio traite dans
-la video d'origine (`-c:v copy`, l'image n'est jamais reencodee), et une FFT
-autonome pour le traitement spectral.
+`media.js` est la boite a outils partagee par le Splitter : formatage
+(taille/duree), sondage de duree sans decodage complet, et les outils du
+journal (copie / enregistrement).
+
+> Echo Remover, Audio Studio et Lyrics ont ete retires (v6.3) pour ne garder
+> que le Splitter. Leur code (`echo.js`, `echo-worker.js`, `studio.js`,
+> `loudness.js`, `lyrics.js`) a ete supprime, ainsi que les exports de
+> `media.js` qui ne servaient qu'a eux (decodage AudioBuffer generique, export
+> WAV, reinjection ffmpeg, FFT).
 
 ### Modules purs (testes)
 
-Trois modules ne touchent ni au DOM ni aux API du navigateur, et sont couverts
+Deux modules ne touchent ni au DOM ni aux API du navigateur, et sont couverts
 par `npm test` (lanceur integre de Node, aucune dependance a installer) :
 
 | Module | Role |
 |---|---|
 | `silence.js` | seuil adaptatif, detection des silences, decoupage en parties |
-| `loudness.js` | mesure de sonie BS.1770-4 (ponderation K + portes) et limiteur |
 | `sfx.js` | synthese des sons de transition, ecriture WAV, fondus |
 
-    npm test        # 66 tests, ~1 s
+    npm test        # 61 tests, ~0,3 s
 
 ## Apercu des coupes
 
@@ -106,51 +107,6 @@ amplifiait le pre-echo du MDCT et donnait a la voix un timbre « metallique /
 robotique ». Le debit est desormais plus genereux et proportionnel au nombre
 de canaux (≈160 kb/s mono, ≈192 kb/s stereo) : les artefacts disparaissent,
 pour un surcout de taille negligeable sur une piste parlee.
-
-## Echo Remover
-Le calcul tourne dans un **Worker** (`echo-worker.js`) : l'interface reste
-fluide, et surtout le traitement n'est plus bride quand l'onglet passe en
-arriere-plan (`setTimeout` y est limite a 1 s/tick, ce qui arretait quasiment
-le traitement des qu'on changeait d'application). Les canaux audio sont
-*transferes* au worker, sans copie. Repli automatique en page si les Workers de
-type module sont indisponibles.
-
-Soustraction spectrale trame par trame (STFT 1024/256, fenetre de Hann) :
-l'estimation de la reverberation tardive (moyenne exponentielle reglee par la
-« taille de piece ») est soustraite du spectre, avec plancher, lissage temporel
-et frequentiel contre le bruit musical, et porte douce optionnelle entre les
-phrases. Comparaison avant/apres integree.
-
-## Audio Studio
-Chaine : porte de bruit maison (attaque 3 ms, relache 120 ms, jamais de mute
-brutal) -> coupe-bas -> EQ 7 bandes -> compresseur -> normalisation vers une
-cible LUFS (-16 streaming / -14 reseaux sociaux) avec limiteur a -1 dBFS.
-**Pre-ecoute en direct** des 10 premieres secondes avec la meme chaine, pour
-regler avant de traiter tout le fichier. Prereglages : Voix, Podcast, Musique,
-Reparation.
-
-### Mesure de sonie (loudness.js)
-La mesure suit **ITU-R BS.1770-4 / EBU R128** : ponderation K (plateau aigu +
-passe-haut RLB), blocs de 400 ms a 75 % de recouvrement, porte absolue a
--70 LUFS puis porte relative a -10 LU. C'est ce qui compte pour une voix
-parlee : elle est pleine de silences, qui tirent un RMS vers le bas sans rien
-changer a la sonie percue. L'ancienne approximation (RMS sous-echantillonne)
-pouvait se tromper de plusieurs decibels sur ce cas precis.
-
-Etalonnage verifie par les tests : un sinus mono de 1 kHz a -23 dBFS RMS se
-mesure a -23,0 LUFS (la constante -0,691 de la norme annule exactement le gain
-de la ponderation K a cette frequence).
-
-Le **limiteur** a une anticipation de 5 ms et une remontee de 100 ms : la
-reduction n'intervient qu'autour des cretes. L'ancienne version se contentait
-de plafonner le gain global, si bien qu'un seul transitoire empechait
-d'atteindre la cible sur tout le fichier.
-
-## Lyrics
-La chanson joue, on tape le gros bouton au debut de chaque ligne (ou barre
-espace au clavier). Correction ligne par ligne, import .lrc existant,
-sauvegarde automatique de la session, export **.lrc** (lecteurs de musique)
-et **.srt** (sous-titres video).
 
 ---
 

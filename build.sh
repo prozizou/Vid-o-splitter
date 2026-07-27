@@ -13,11 +13,10 @@ LOCK="$ROOT/vendor.lock"
 echo "▶ Build : préparation de dist/"
 rm -rf dist
 mkdir -p dist/vendor
-cp index.html splitter.html echo.html studio.html lyrics.html \
+cp index.html splitter.html \
    app.js turbo.js turbo-util.js turbo-mp4.js turbo-video.js \
    turbo-audio.js turbo-render.js turbo-join.js \
-   silence.js media.js sfx.js \
-   echo.js echo-worker.js studio.js lyrics.js sw-register.js \
+   silence.js media.js sfx.js sw-register.js \
    style.css manifest.webmanifest sw.js dist/
 cp -R icons dist/icons
 
@@ -129,7 +128,8 @@ REQUIRED=(
   "dist/turbo.js"
   "dist/turbo-render.js"
   "dist/silence.js"
-  "dist/echo-worker.js"
+  "dist/media.js"
+  "dist/sfx.js"
   "dist/sw-register.js"
   "dist/sw.js"
   "dist/vendor/ffmpeg/index.js"
