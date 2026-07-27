@@ -437,6 +437,23 @@ function bitrateFor(w, h, fps, crf) {
   return Math.max(400_000, Math.round(w * h * fps * bpp));
 }
 
+// Frequences que les encodeurs MATERIELS reconnaissent generalement. Une
+// video de telephone a debit variable (l'appareil freine la capture sur une
+// image statique, pour l'autonomie) donne une frequence MOYENNE souvent non
+// standard — 56 im/s par exemple — alors que le flux reel ne depasse jamais
+// 60. Demander cette moyenne telle quelle a l'encodeur materiel peut suffire
+// a faire rejeter TOUS les candidats de codec, alors qu'une frequence
+// standard proche serait acceptee sans probleme.
+//
+// C'est un champ sans consequence sur le rendu : `framerate` de
+// VideoEncoderConfig ne sert qu'au controle de debit, jamais a caler le
+// calendrier reel des images — chaque VideoFrame garde l'horodatage qu'on lui
+// donne dans emit(). L'arrondir ne ralentit ni n'accelere rien a l'ecran.
+const STD_FPS = [24, 25, 30, 50, 60];
+function nearestStdFps(fps) {
+  return STD_FPS.reduce((best, f) => (Math.abs(f - fps) < Math.abs(best - fps) ? f : best), STD_FPS[0]);
+}
+
 /**
  * Choisit une configuration d'encodeur H.264 supportée.
  *
@@ -457,30 +474,31 @@ function bitrateFor(w, h, fps, crf) {
  * `downgraded` permet a l'appelant de le dire tout de suite, avant la
  * premiere image encodee, plutot que de laisser deviner via la vitesse
  * mesuree en fin de traitement.
- * @returns { config, downgraded } — downgraded = vrai si `accel` demande n'a
- *   pu etre honore par AUCUN candidat de codec.
+ * @returns { config, downgraded } — downgraded = vrai si AUCUN essai materiel
+ *   (frequence source comprise ou arrondie a une valeur standard) n'a abouti.
  */
 async function pickVideoConfig(w, h, fps, crf, accel = 'prefer-hardware') {
   const base = {
-    width: w, height: h, framerate: fps,
+    width: w, height: h,
     bitrate: bitrateFor(w, h, fps, crf),
     avc: { format: 'avc' },
-    hardwareAcceleration: accel,
   };
-  for (const codec of CODEC_CANDIDATES) {
-    try {
-      const cfg = { ...base, codec };
-      const s = await VideoEncoder.isConfigSupported(cfg);
-      if (s.supported) return { config: s.config || cfg, downgraded: false };
-    } catch {}
-  }
-  // Dernier essai : on laisse le navigateur choisir l'accélération.
-  for (const codec of CODEC_CANDIDATES) {
-    try {
-      const cfg = { ...base, codec, hardwareAcceleration: 'no-preference' };
-      const s = await VideoEncoder.isConfigSupported(cfg);
-      if (s.supported) return { config: s.config || cfg, downgraded: accel !== 'no-preference' };
-    } catch {}
+  const stdFps = nearestStdFps(fps);
+  // 1) frequence source telle quelle ; 2) meme materiel mais frequence
+  // arrondie a une valeur standard (souvent suffisant, voir STD_FPS) ; 3) on
+  // laisse le navigateur choisir librement, y compris un encodeur logiciel.
+  const attempts = [{ framerate: fps, hardwareAcceleration: accel }];
+  if (stdFps !== fps) attempts.push({ framerate: stdFps, hardwareAcceleration: accel });
+  attempts.push({ framerate: fps, hardwareAcceleration: 'no-preference' });
+
+  for (const attempt of attempts) {
+    for (const codec of CODEC_CANDIDATES) {
+      try {
+        const cfg = { ...base, codec, ...attempt };
+        const s = await VideoEncoder.isConfigSupported(cfg);
+        if (s.supported) return { config: s.config || cfg, downgraded: attempt.hardwareAcceleration !== accel };
+      } catch {}
+    }
   }
   throw new Error("Aucun encodeur H.264 disponible sur cet appareil.");
 }
@@ -540,10 +558,11 @@ async function renderAllOnce(file, parts, opts, cb, accel) {
   if (!vDesc) throw new Error("Codec vidéo non pris en charge par le moteur turbo.");
   const { config: encCfg, downgraded } = await pickVideoConfig(W, H, fps, opts.crf, accel);
   if (cb.onLog) {
+    const fpsNote = encCfg.framerate !== fps ? ` (cadence source ${fps}fps arrondie pour le matériel)` : '';
     cb.onLog(downgraded
       ? `⚠️ Pas d'encodeur matériel pour ${W}×${H}@${fps}fps sur cet appareil : ` +
         `repli sur un encodeur logiciel (${encCfg.codec}). Le rendu sera nettement plus lent.`
-      : `🎞️ Encodeur : ${encCfg.codec} (${encCfg.hardwareAcceleration}), ${W}×${H}@${fps}fps.`);
+      : `🎞️ Encodeur : ${encCfg.codec} (${encCfg.hardwareAcceleration}), ${W}×${H}@${encCfg.framerate}fps${fpsNote}.`);
   }
 
   const aSR = aT ? aT.audio.sample_rate : 0;
