@@ -14,7 +14,7 @@ import {
 } from './turbo-util.js';
 import {
   loadMP4Box, loadMuxer, createSampleStream,
-  videoDescription, audioDescription, createGopPrimer,
+  videoDescription, audioDescription, audioBitrate, createGopPrimer,
 } from './turbo-mp4.js';
 import { align16, MAX_FPS, pickVideoConfig } from './turbo-video.js';
 import { applyEQ } from './turbo-audio.js';
@@ -130,6 +130,10 @@ async function renderAllOnce(file, parts, opts, cb, accel) {
 
   const aSR = aT ? aT.audio.sample_rate : 0;
   const aCH = aT ? Math.min(2, aT.audio.channel_count) : 0;
+  // Débit de la source, pour ré-encoder la voix au MÊME débit qu'à l'origine
+  // (voir la config de l'AudioEncoder plus bas). Repli seulement si l'esds ne
+  // le déclare pas.
+  const aBitrateSrc = aT ? audioBitrate(stream.mp4, aT.id) : 0;
 
   // --- Quels GOP faut-il décoder ? ---------------------------------
   // Un GOP entièrement dans un silence n'est jamais décodé : gain énorme.
@@ -510,13 +514,13 @@ async function renderAllOnce(file, parts, opts, cb, accel) {
         error: e => sink.fail(e, 'Encodage audio'),
       });
       // VOIX ROBOTIQUE — la source est presque toujours DEJA de l'AAC, donc la
-      // ré-encoder est un encodage EN TANDEM. A 128 kb/s, la 2e génération
-      // amplifiait le pré-écho du MDCT : sur une voix (transitoires nets,
-      // silences), ça s'entend comme un timbre « métallique / robotique ». Un
-      // débit plus généreux et proportionnel au nombre de canaux (≈160 kb/s
-      // mono, ≈192 kb/s stéréo) les fait disparaître, pour un surcoût de taille
-      // négligeable sur une piste parlée.
-      const aBitrate = Math.min(256_000, Math.max(160_000, aCH * 96_000));
+      // ré-encoder est un encodage EN TANDEM. Ré-encoder à un débit DIFFÉRENT de
+      // l'original colore le timbre (pré-écho du MDCT amplifié par la 2e
+      // génération) : c'est ce qu'on entend comme une voix « métallique /
+      // robotique ». On garde donc les paramètres de départ inchangés — même
+      // fréquence, mêmes canaux, et surtout MÊME débit que la source. Repli sur
+      // 192 kb/s seulement si l'esds ne déclare aucun débit exploitable.
+      const aBitrate = aBitrateSrc || 192_000;
       aenc.configure({ codec: 'mp4a.40.2', sampleRate: aSR, numberOfChannels: aCH, bitrate: aBitrate });
 
       const BLOCK = 1024;
@@ -549,9 +553,13 @@ async function renderAllOnce(file, parts, opts, cb, accel) {
         `(aucun échantillon récupéré sur ${map.length} segment(s))`);
     }
     if (cb.onLog) {
+      const abNote = aT
+        ? `, audio AAC ${Math.round((aBitrateSrc || 192_000) / 1000)} kb/s` +
+          (aBitrateSrc ? ' (débit source conservé)' : ' (source non déclarée)')
+        : '';
       cb.onLog(`   partie ${part.index + 1} : ${framesOut} image(s), ` +
-               `${(audioSamples / (aSR || 1)).toFixed(1)} s d'audio` +
-               (planarRefused ? ' (audio désentrelacé sur repli)' : ''));
+               `${(audioSamples / (aSR || 1)).toFixed(1)} s d'audio${abNote}` +
+               (planarRefused ? ' — audio désentrelacé sur repli' : ''));
     }
 
     const blob = new Blob([target.buffer], { type: 'video/mp4' });
