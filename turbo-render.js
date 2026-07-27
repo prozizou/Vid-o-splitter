@@ -14,7 +14,7 @@ import {
 } from './turbo-util.js';
 import {
   loadMP4Box, loadMuxer, createSampleStream,
-  videoDescription, audioDescription, audioBitrate, createGopPrimer,
+  videoDescription, audioDescription, audioBitrate, aacDecoderCodec, createGopPrimer,
 } from './turbo-mp4.js';
 import { align16, MAX_FPS, pickVideoConfig } from './turbo-video.js';
 import { applyEQ } from './turbo-audio.js';
@@ -134,6 +134,14 @@ async function renderAllOnce(file, parts, opts, cb, accel) {
   // (voir la config de l'AudioEncoder plus bas). Repli seulement si l'esds ne
   // le déclare pas.
   const aBitrateSrc = aT ? audioBitrate(stream.mp4, aT.id) : 0;
+  // Profil AAC réellement décodé (voir aacDecoderCodec) : journalisé pour
+  // qu'on puisse vérifier si une source est en HE-AAC (« .40.5 »/« .40.29 »),
+  // le cas qui rendait la voix robotique avant ce correctif.
+  const aDecCodec = aT ? (aT.codec.startsWith('mp4a') ? aacDecoderCodec(aT.codec) : aT.codec) : '';
+  if (aT && cb.onLog) {
+    const mismatch = aDecCodec !== aT.codec ? ` (source déclarée ${aT.codec})` : '';
+    cb.onLog(`🎙️ Audio source : ${aDecCodec}${mismatch}, ${aSR} Hz, ${aCH} canal(aux).`);
+  }
 
   // --- Quels GOP faut-il décoder ? ---------------------------------
   // Un GOP entièrement dans un silence n'est jamais décodé : gain énorme.
@@ -203,7 +211,7 @@ async function renderAllOnce(file, parts, opts, cb, accel) {
       error: e => sink.fail(e, 'Décodage audio'),
     });
     adec.configure({
-      codec: aT.codec.startsWith('mp4a') ? 'mp4a.40.2' : aT.codec,
+      codec: aDecCodec,
       sampleRate: aSR, numberOfChannels: aT.audio.channel_count,
       description: audioDescription(stream.mp4, aT.id, aSR, aT.audio.channel_count) || undefined,
     });

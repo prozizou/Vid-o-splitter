@@ -8,7 +8,7 @@
    ========================================================================== */
 
 import { usOf, sleep, errorSink, guarded } from './turbo-util.js';
-import { loadMP4Box, createSampleStream, audioDescription } from './turbo-mp4.js';
+import { loadMP4Box, createSampleStream, audioDescription, aacDecoderCodec } from './turbo-mp4.js';
 
 export async function turboAnalyze(file, windowSec, onProgress) {
   const MP4Box = await loadMP4Box();
@@ -46,7 +46,7 @@ export async function turboAnalyze(file, windowSec, onProgress) {
     error: e => sink.fail(e, 'Décodage audio'),
   });
   dec.configure({
-    codec: aTrack.codec.startsWith('mp4a') ? 'mp4a.40.2' : aTrack.codec,
+    codec: aTrack.codec.startsWith('mp4a') ? aacDecoderCodec(aTrack.codec) : aTrack.codec,
     sampleRate: sr, numberOfChannels: ch,
     description: audioDescription(stream.mp4, aTrack.id, sr, ch) || undefined,
   });

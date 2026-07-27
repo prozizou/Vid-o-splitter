@@ -11,8 +11,9 @@
       était perdu, silencieusement. On précache désormais les URL propres.
 
    2. Le repli de navigation renvoyait toujours /index.html : hors-ligne,
-      ouvrir /studio (ou un raccourci du manifeste) affichait l'accueil. On
-      cherche maintenant la page demandée dans le cache avant de se rabattre.
+      ouvrir une page précachée (un raccourci du manifeste, par exemple)
+      affichait l'accueil. On cherche maintenant la page demandée dans le
+      cache avant de se rabattre.
 
    3. Le shell était servi en cache-first : après un déploiement, l'utilisateur
       recevait le HTML neuf (navigation en réseau-d'abord) avec l'ancien JS.
@@ -32,7 +33,7 @@ const SHELL_CACHE  = `shell-${VERSION}`;
 const VENDOR_CACHE = `vendor-${VERSION}`;
 
 // URL PROPRES (sans .html) : c'est ce que sert Vercel avec cleanUrls.
-const PAGES = ['/', '/splitter', '/echo', '/studio', '/lyrics'];
+const PAGES = ['/', '/splitter'];
 
 const ASSETS = [
   '/app.js',
@@ -46,10 +47,6 @@ const ASSETS = [
   '/silence.js',
   '/media.js',
   '/sfx.js',
-  '/echo.js',
-  '/echo-worker.js',
-  '/studio.js',
-  '/lyrics.js',
   '/sw-register.js',
   '/style.css',
   '/manifest.webmanifest',

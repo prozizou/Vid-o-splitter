@@ -3,7 +3,7 @@
   "version": "6.2.0",
   "private": true,
   "type": "module",
-  "description": "Boîte à outils vidéo et audio 100 % locale : coupe des silences (WebCodecs), réduction d'écho, mastering voix, synchronisation de paroles.",
+  "description": "Splitter vidéo 100 % local : coupe les silences via WebCodecs, traitement par parties, reprise après coupure.",
   "scripts": {
     "build": "bash build.sh",
     "test": "node --test \"test/*.test.js\""
