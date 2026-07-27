@@ -450,9 +450,20 @@ function bitrateFor(w, h, fps, crf) {
 // calendrier reel des images — chaque VideoFrame garde l'horodatage qu'on lui
 // donne dans emit(). L'arrondir ne ralentit ni n'accelere rien a l'ecran.
 const STD_FPS = [24, 25, 30, 50, 60];
-function nearestStdFps(fps) {
+export function nearestStdFps(fps) {
   return STD_FPS.reduce((best, f) => (Math.abs(f - fps) < Math.abs(best - fps) ? f : best), STD_FPS[0]);
 }
+
+// Cadence maximale du rendu turbo. Une video parlee (le public vise par cet
+// outil : silences a couper, podcasts, vlogs) n'apporte rien de plus a 50 ou
+// 60 im/s qu'a 30 — l'oeil ne gagne rien sur un plan quasi fixe. En revanche
+// une cadence source elevee ou non standard (56 par exemple, une MOYENNE sur
+// un flux a debit variable) coute deux fois plus d'images a encoder, et peut
+// a elle seule faire echouer l'essai materiel (voir nearestStdFps). Plafonner
+// ici, avant l'encodage, regle les deux problemes a la fois : moitie moins
+// d'images a passer dans l'encodeur (le poste le plus couteux, surtout en
+// repli logiciel), et une cadence toujours standard.
+const MAX_FPS = 30;
 
 /**
  * Choisit une configuration d'encodeur H.264 supportée.
@@ -552,17 +563,23 @@ async function renderAllOnce(file, parts, opts, cb, accel) {
 
   const W = vT.track_width || vT.video.width;
   const H = vT.track_height || vT.video.height;
-  const fps = Math.max(1, Math.round((vT.nb_samples * vT.timescale) / vT.duration)) || 30;
+  const srcFps = Math.max(1, Math.round((vT.nb_samples * vT.timescale) / vT.duration)) || 30;
+  const fps = Math.min(srcFps, MAX_FPS);
+  // > 0 : les images en trop sont ignorees dans emit(), voir MAX_FPS.
+  const minFrameGapUs = srcFps > MAX_FPS ? Math.round(US / MAX_FPS) : 0;
 
   const vDesc = videoDescription(stream.mp4, vT.id, MP4Box);
   if (!vDesc) throw new Error("Codec vidéo non pris en charge par le moteur turbo.");
   const { config: encCfg, downgraded } = await pickVideoConfig(W, H, fps, opts.crf, accel);
   if (cb.onLog) {
-    const fpsNote = encCfg.framerate !== fps ? ` (cadence source ${fps}fps arrondie pour le matériel)` : '';
+    const capNote = minFrameGapUs > 0
+      ? ` (cadence source ${srcFps}fps plafonnée à ${MAX_FPS}fps : une image sur ${Math.round(srcFps / MAX_FPS)} environ est ignorée)`
+      : '';
+    const roundNote = encCfg.framerate !== fps ? ` — cadence ${fps}fps arrondie à ${encCfg.framerate}fps pour le matériel` : '';
     cb.onLog(downgraded
       ? `⚠️ Pas d'encodeur matériel pour ${W}×${H}@${fps}fps sur cet appareil : ` +
-        `repli sur un encodeur logiciel (${encCfg.codec}). Le rendu sera nettement plus lent.`
-      : `🎞️ Encodeur : ${encCfg.codec} (${encCfg.hardwareAcceleration}), ${W}×${H}@${encCfg.framerate}fps${fpsNote}.`);
+        `repli sur un encodeur logiciel (${encCfg.codec}).${capNote} Le rendu sera nettement plus lent.`
+      : `🎞️ Encodeur : ${encCfg.codec} (${encCfg.hardwareAcceleration}), ${W}×${H}@${encCfg.framerate}fps${roundNote}${capNote}.`);
   }
 
   const aSR = aT ? aT.audio.sample_rate : 0;
@@ -713,11 +730,18 @@ async function renderAllOnce(file, parts, opts, cb, accel) {
     // restait figee sur la valeur laissee par l'analyse, du debut a la fin. On
     // ne pouvait pas distinguer « ca travaille » de « c'est bloque ».
     let emittedUs = 0, lastReport = 0, framesOut = 0;
+    // Cadence plafonnee a MAX_FPS (voir sa definition) : par partie, puisque
+    // chaque partie repart d'un horodatage de sortie proche de zero.
+    let lastKeptUs = -Infinity;
     const emit = frame => {
       const m = inRange(frame.timestamp);
       if (!m) { frame.close(); return; }
       const outTs = m.off + (frame.timestamp - m.s);
-      const dur = frame.duration || Math.round(US / fps);
+
+      if (minFrameGapUs > 0 && outTs - lastKeptUs < minFrameGapUs) { frame.close(); return; }
+      lastKeptUs = outTs;
+
+      const dur = minFrameGapUs > 0 ? minFrameGapUs : (frame.duration || Math.round(US / fps));
 
       emittedUs = Math.max(emittedUs, outTs + dur);
       const now = performance.now();

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { snapshotSample, resolveDataStream, withTimeout, createGopPrimer, drainTo } from '../turbo.js';
+import { snapshotSample, resolveDataStream, withTimeout, createGopPrimer, drainTo, nearestStdFps } from '../turbo.js';
 
 /**
  * Régression : le moteur turbo n'a jamais pu démarrer parce que les
@@ -291,4 +291,31 @@ test('drainTo fonctionne sans l\'evenement dequeue (repli par sondage)', async (
   setTimeout(() => { c.encodeQueueSize = 3; }, 10);
   await attente;
   assert.ok(c.encodeQueueSize <= 6);
+});
+
+/**
+ * Regression : rendu turbo a 0,42x sur 1080x2436@56fps, sans le moindre
+ * message d'erreur. 56 im/s est presque surement une MOYENNE calculee sur un
+ * flux a debit variable (le telephone freine la capture sur une image
+ * statique) : le flux reel ne depasse jamais 60, mais demander 56 telle
+ * quelle a l'encodeur MATERIEL suffisait a faire rejeter tous les candidats
+ * de codec. nearestStdFps() propose une valeur standard proche, que
+ * pickVideoConfig() essaie en materiel AVANT d'abandonner au logiciel.
+ */
+test('nearestStdFps trouve la valeur standard la plus proche', () => {
+  assert.equal(nearestStdFps(56), 60, 'cas reel signale : 56 im/s (moyenne VFR) -> 60');
+  assert.equal(nearestStdFps(29), 30);
+  assert.equal(nearestStdFps(23), 24);
+  assert.equal(nearestStdFps(48), 50);
+});
+
+test('nearestStdFps renvoie la valeur telle quelle si deja standard', () => {
+  for (const f of [24, 25, 30, 50, 60]) assert.equal(nearestStdFps(f), f);
+});
+
+test('nearestStdFps garde le premier candidat trouve en cas d\'egalite stricte', () => {
+  // 40 est a egale distance de 30 et 50 (10 de chaque cote) : reduce() ne
+  // remplace le meilleur trouve que sur une distance STRICTEMENT plus
+  // petite, donc 30 (rencontre avant 50 dans STD_FPS) l'emporte.
+  assert.equal(nearestStdFps(40), 30);
 });
