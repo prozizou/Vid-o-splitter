@@ -378,17 +378,23 @@ sfxTest.addEventListener('click', async () => {
 });
 
 // --- Choix du moteur ---
+//
+// MODE DIAGNOSTIC : le repli automatique vers ffmpeg a été retiré du pipeline
+// turbo (analyse, rendu, réunion). Une erreur turbo remonte donc telle quelle
+// au lieu d'être masquée par un second essai en logiciel — c'est voulu, le
+// temps d'observer comment le moteur turbo se comporte réellement et quelles
+// erreurs il produit. ffmpeg reste le SEUL chemin quand WebCodecs est absent
+// du navigateur : ça, ce n'est pas un repli sur erreur, c'est une incapacité
+// matérielle qu'aucun réglage ne change.
 const engineSel = $('engine'), engineNote = $('engineNote');
 const TURBO_OK = turboSupported();
 function refreshEngine() {
-  engine = engineSel.value === 'compat' || !TURBO_OK ? 'compat' : 'turbo';
-  engineNote.textContent = engine === 'turbo'
-    ? '⚡ Encodage par la puce vidéo du téléphone. 10× à 50× plus rapide.'
-    : (TURBO_OK
-        ? '🐢 Encodage logiciel ffmpeg. Plus lent, mais accepte tous les formats.'
-        : '🐢 WebCodecs indisponible sur ce navigateur : moteur logiciel utilisé.');
+  engine = TURBO_OK ? 'turbo' : 'compat';
+  engineNote.textContent = TURBO_OK
+    ? '⚡ Encodage par la puce vidéo du téléphone. Mode diagnostic : aucun repli vers ffmpeg, une erreur turbo s\'affiche telle quelle.'
+    : '🐢 WebCodecs indisponible sur ce navigateur : moteur logiciel ffmpeg utilisé (seul chemin possible ici).';
 }
-if (!TURBO_OK) { engineSel.value = 'compat'; engineSel.disabled = true; }
+if (!TURBO_OK) engineSel.disabled = true;
 // Le découpage en parties dépend du moteur : l'aperçu doit suivre.
 engineSel.addEventListener('change', () => { refreshEngine(); queueCutsRefresh(); });
 refreshEngine();
@@ -808,15 +814,10 @@ async function ensureAnalysis() {
 
   let loud, winSec, duration;
   if (engine === 'turbo') {
-    try {
-      ({ loud, winSec, duration } = await turboAnalyze(file, CONFIG.windowSec, phaseProgress));
-    } catch (e) {
-      log('⚠️ Analyse turbo impossible (' + e.message + '). Passage au moteur logiciel.');
-      engine = 'compat';
-      engineSel.value = 'compat'; refreshEngine();
-    }
-  }
-  if (engine === 'compat') {
+    // Mode diagnostic : aucun repli. Une erreur ici remonte jusqu'au bouton
+    // « Traiter », avec son message exact.
+    ({ loud, winSec, duration } = await turboAnalyze(file, CONFIG.windowSec, phaseProgress));
+  } else {
     const ff = await getFFmpeg();
     const input = await openInput(ff, file);
     try {
@@ -1269,17 +1270,12 @@ processBtn.addEventListener('click', async () => {
           onPartDone: finishPart,
         });
       } catch (e) {
-        const doneAny = job.chunks.some(c => c.status === 'done');
+        // Mode diagnostic : aucun repli vers ffmpeg. L'erreur turbo remonte
+        // telle quelle jusqu'au bloc catch de plus haut, qui l'affiche.
         log('⚠️ Moteur turbo interrompu : ' + e.message);
-        if (doneAny) throw e;
-        log('↩️ Bascule sur le moteur logiciel ffmpeg.');
-        engine = 'compat';
-        engineSel.value = 'compat'; refreshEngine();
-        job.chunks.forEach(c => { if (c.status !== 'done') c.status = 'pending'; updatePartRow(c); });
+        throw e;
       }
-    }
-
-    if (engine === 'compat') {
+    } else {
       if (!ff) { ff = await getFFmpeg(); }
       if (!input) { input = await openInput(ff); }
       const left = job.chunks.filter(c => c.status !== 'done');
@@ -1368,10 +1364,9 @@ joinBtn.addEventListener('click', async () => {
 
     let blob;
     if (engine === 'turbo') {
-      try { blob = await turboJoin(blobs); }
-      catch (e) { log('⚠️ Réunion turbo impossible (' + e.message + '). Passage à ffmpeg.'); }
-    }
-    if (!blob) {
+      // Mode diagnostic : aucun repli vers ffmpeg ici non plus.
+      blob = await turboJoin(blobs);
+    } else {
       const ff = await getFFmpeg();
       blob = await joinParts(ff, done.map((c, i) => ({ index: c.index, blob: blobs[i] })));
     }
