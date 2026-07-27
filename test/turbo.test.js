@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { snapshotSample, resolveDataStream, withTimeout, createGopPrimer, drainTo, nearestStdFps } from '../turbo.js';
+import { snapshotSample, resolveDataStream, withTimeout, createGopPrimer, drainTo, nearestStdFps, align16 } from '../turbo.js';
 
 /**
  * Régression : le moteur turbo n'a jamais pu démarrer parce que les
@@ -318,4 +318,27 @@ test('nearestStdFps garde le premier candidat trouve en cas d\'egalite stricte',
   // remplace le meilleur trouve que sur une distance STRICTEMENT plus
   // petite, donc 30 (rencontre avant 50 dans STD_FPS) l'emporte.
   assert.equal(nearestStdFps(40), 30);
+});
+
+/**
+ * Regression : encodage materiel accepte a la CONFIGURATION (1080x2436,
+ * `isConfigSupported` repond « supported ») mais qui echoue au RENDU avec
+ * « Encoding error » — l'alignement sur 16 exige par la plupart des
+ * encodeurs materiels Android n'est pas toujours verifie par
+ * isConfigSupported. align16() rogne vers le bas (jamais vers le haut, pour
+ * n'inventer aucun contenu de bordure).
+ */
+test('align16 rogne au multiple de 16 inferieur', () => {
+  assert.equal(align16(1080), 1072, 'cas reel signale : largeur 1080 -> 1072');
+  assert.equal(align16(2436), 2432, 'cas reel signale : hauteur 2436 -> 2432');
+});
+
+test('align16 ne touche pas une dimension deja alignee', () => {
+  for (const n of [16, 32, 1920, 1080 + 8]) assert.equal(align16(n), n);
+});
+
+test('align16 ne descend jamais sous 16', () => {
+  assert.equal(align16(15), 16);
+  assert.equal(align16(1), 16);
+  assert.equal(align16(0), 16);
 });
