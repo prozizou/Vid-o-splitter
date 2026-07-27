@@ -437,6 +437,29 @@ function bitrateFor(w, h, fps, crf) {
   return Math.max(400_000, Math.round(w * h * fps * bpp));
 }
 
+/**
+ * Choisit une configuration d'encodeur H.264 supportée.
+ *
+ * Repli SILENCIEUX a dessein detecte par l'appelant, pas ici : quand AUCUN
+ * candidat ne supporte `accel` (typiquement 'prefer-hardware'), on relache la
+ * contrainte et on relance avec 'no-preference' — le navigateur choisit alors
+ * librement, y compris un encodeur logiciel.
+ *
+ * Ce repli-la ne leve JAMAIS d'exception : il aboutit presque toujours a une
+ * config valide, donc `renderAllOnce` ne voit jamais d'echec et ne le
+ * remonte jamais a `turboRenderAll`, qui est le seul endroit qui journalise
+ * « Codec matériel en échec ». Resultat observe : un rendu qui tourne a
+ * 0,4x sur une video de 10 min, sans le moindre message d'alerte avant la fin
+ * — l'appareil n'a simplement pas d'encodeur materiel pour cette resolution
+ * (frequente au-dela de 1080p, ou en orientation portrait sur certains
+ * telephones), et rien ne le signalait avant que l'encodage entier soit fini.
+ *
+ * `downgraded` permet a l'appelant de le dire tout de suite, avant la
+ * premiere image encodee, plutot que de laisser deviner via la vitesse
+ * mesuree en fin de traitement.
+ * @returns { config, downgraded } — downgraded = vrai si `accel` demande n'a
+ *   pu etre honore par AUCUN candidat de codec.
+ */
 async function pickVideoConfig(w, h, fps, crf, accel = 'prefer-hardware') {
   const base = {
     width: w, height: h, framerate: fps,
@@ -448,7 +471,7 @@ async function pickVideoConfig(w, h, fps, crf, accel = 'prefer-hardware') {
     try {
       const cfg = { ...base, codec };
       const s = await VideoEncoder.isConfigSupported(cfg);
-      if (s.supported) return s.config || cfg;
+      if (s.supported) return { config: s.config || cfg, downgraded: false };
     } catch {}
   }
   // Dernier essai : on laisse le navigateur choisir l'accélération.
@@ -456,7 +479,7 @@ async function pickVideoConfig(w, h, fps, crf, accel = 'prefer-hardware') {
     try {
       const cfg = { ...base, codec, hardwareAcceleration: 'no-preference' };
       const s = await VideoEncoder.isConfigSupported(cfg);
-      if (s.supported) return s.config || cfg;
+      if (s.supported) return { config: s.config || cfg, downgraded: accel !== 'no-preference' };
     } catch {}
   }
   throw new Error("Aucun encodeur H.264 disponible sur cet appareil.");
@@ -515,7 +538,13 @@ async function renderAllOnce(file, parts, opts, cb, accel) {
 
   const vDesc = videoDescription(stream.mp4, vT.id, MP4Box);
   if (!vDesc) throw new Error("Codec vidéo non pris en charge par le moteur turbo.");
-  const encCfg = await pickVideoConfig(W, H, fps, opts.crf, accel);
+  const { config: encCfg, downgraded } = await pickVideoConfig(W, H, fps, opts.crf, accel);
+  if (cb.onLog) {
+    cb.onLog(downgraded
+      ? `⚠️ Pas d'encodeur matériel pour ${W}×${H}@${fps}fps sur cet appareil : ` +
+        `repli sur un encodeur logiciel (${encCfg.codec}). Le rendu sera nettement plus lent.`
+      : `🎞️ Encodeur : ${encCfg.codec} (${encCfg.hardwareAcceleration}), ${W}×${H}@${fps}fps.`);
+  }
 
   const aSR = aT ? aT.audio.sample_rate : 0;
   const aCH = aT ? Math.min(2, aT.audio.channel_count) : 0;
