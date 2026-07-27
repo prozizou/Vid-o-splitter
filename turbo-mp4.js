@@ -136,6 +136,29 @@ function audioDescription(mp4file, trackId, sampleRate, channels) {
 }
 
 /**
+ * Codec à passer au AudioDecoder, en préservant le VRAI profil AAC de la
+ * source (mp4box le calcule depuis l'AudioSpecificConfig réelle du flux :
+ * 'mp4a.40.2' = AAC-LC, 'mp4a.40.5' = HE-AAC/SBR, 'mp4a.40.29' = HE-AACv2).
+ *
+ * VOIX ROBOTIQUE — la source d'une voix enregistrée sur téléphone est souvent
+ * en HE-AAC (plus efficace qu'AAC-LC à bas débit sur de la parole). Décoder un
+ * flux HE-AAC en forçant le profil LC saute la reconstruction de bande
+ * spectrale (SBR) : le décodeur ne restitue alors que la moitié grave du
+ * spectre réel, à la moitié de la fréquence d'échantillonnage effective. Le
+ * code réencodait ensuite ce PCM tronqué comme s'il était complet, au débit
+ * DÉCLARÉ par le conteneur — d'où une voix trop aiguë, « robotique ».
+ *
+ * On ne force donc PLUS jamais le profil : la chaîne de la source est utilisée
+ * telle quelle dès qu'elle est complète (deux composantes numériques après
+ * 'mp4a.'). Repli sur AAC-LC uniquement si mp4box n'a pas pu déterminer le
+ * profil (chaîne 'mp4a' nue, esds absent ou illisible) — un cas où de toute
+ * façon aucune information de profil n'existe à préserver.
+ */
+function aacDecoderCodec(codec) {
+  return /^mp4a\.[0-9a-fA-F]+\.\d+$/.test(codec) ? codec : 'mp4a.40.2';
+}
+
+/**
  * Débit audio DÉCLARÉ par la source, en bits/s (0 si inconnu).
  *
  * Lu dans le DecoderConfigDescriptor de l'esds (`avgBitrate`, sinon
@@ -241,4 +264,4 @@ async function createSampleStream(file, MP4Box, wanted) {
   }
 }
 
-export { loadMP4Box, loadMuxer, videoDescription, audioDescription, audioBitrate, createSampleStream };
+export { loadMP4Box, loadMuxer, videoDescription, audioDescription, audioBitrate, aacDecoderCodec, createSampleStream };
