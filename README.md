@@ -21,15 +21,12 @@ journal (copie / enregistrement).
 
 ### Modules purs (testes)
 
-Deux modules ne touchent ni au DOM ni aux API du navigateur, et sont couverts
-par `npm test` (lanceur integre de Node, aucune dependance a installer) :
+`silence.js` ne touche ni au DOM ni aux API du navigateur (seuil adaptatif,
+detection des silences, decoupage en parties), et est couvert par `npm test`
+(lanceur integre de Node, aucune dependance a installer) aux cotes des
+briques pures de `turbo.js` :
 
-| Module | Role |
-|---|---|
-| `silence.js` | seuil adaptatif, detection des silences, decoupage en parties |
-| `sfx.js` | synthese des sons de transition, ecriture WAV, fondus |
-
-    npm test        # 61 tests, ~0,3 s
+    npm test        # 53 tests, ~0,3 s
 
 ## Apercu des coupes
 
@@ -53,36 +50,15 @@ ne derape pas. Une video dont le bruit de fond change en cours de route
 bout. Une hysterese legere (0,8) evite le papillonnement d'un signal qui frole
 le seuil ; la temporisation, elle, reste assuree par « silence minimum ».
 
-## Transitions du Splitter (v6.1)
+## Egaliseur voix : coherence entre moteurs
 
-Panneau **Transitions** en haut de `/splitter.html`. Fichier : `sfx.js`.
-
-**Fondu au noir** (0 a 200 ms, defaut 60 ms) de part et d'autre de chaque
-raccord. Jamais applique au tout debut ni a la toute fin du film ; applique aux
-coutures entre parties, ce qui masque les seams. Bride a `duree_segment / 2.5`
-pour qu'un segment court ne soit pas devore par son propre fondu.
-
-**Son de transition** : Clic leger, Souffle doux, Whoosh, Tic montant. Aucun
-fichier audio n'est telecharge, tout est synthetise (bruit deterministe, pas de
-`Math.random` : le rendu est identique a chaque passage). Volume reglable, -18 dB
-par defaut. Bouton d'ecoute pour choisir sans rien traiter. Le son demarre 30 %
-avant le raccord : l'oreille l'entend annoncer la coupe.
-
-Les deux moteurs produisent les memes coupes, les memes fondus et les memes
-bruitages :
-- **turbo** : fondu par `OffscreenCanvas` (seules les images du fondu sont
-  redessinees), son melange dans le PCM apres l'egaliseur.
-- **ffmpeg** : filtres `fade` par segment, et un « lit » WAV de la duree de la
-  partie contenant deja les bruitages, mixe via `amix=normalize=0` (la voix
-  n'est pas baissee). Repli automatique sans bruitage si `amix` echoue.
-
-Le son passe apres l'egaliseur : il n'est jamais colore par les reglages de voix.
+Les deux moteurs produisent les memes coupes. Les bandes de l'egaliseur sont
+equivalentes entre eux (biquad peaking de meme frequence, meme Q, meme gain).
 
 **Une difference subsiste**, et elle est assumee : la case « egaliser le volume
 entre les passages » applique `dynaudnorm` cote ffmpeg et un compresseur Web
 Audio cote turbo. Le rendu n'est donc pas identique au decibel pres entre les
-deux moteurs sur cette option precise. Les bandes de l'egaliseur, elles, sont
-equivalentes (biquad peaking de meme frequence, meme Q, meme gain).
+deux moteurs sur cette option precise.
 
 ## Réseau social visé (conversion + qualité)
 
@@ -96,8 +72,8 @@ qualité. La qualité suggérée est appliquée au changement de préréglage, m
 reste ajustable ensuite via le curseur « Qualité vidéo ».
 
 La conversion se fait EN MEME TEMPS que le rendu, en une seule passe : chaque
-image conservée est mise à l'échelle « remplir » (cover) sur la toile hors
-écran déjà utilisée pour les fondus, puis rognée au centre. Le rapport
+image conservée est mise à l'échelle « remplir » (cover) sur une toile hors
+écran, puis rognée au centre. Le rapport
 d'aspect est préservé — un plan paysage devient un portrait cadré au centre,
 sans déformation ni bandes noires. On ne sur-échantillonne jamais la cadence :
 viser 30 im/s plafonne à 30, une source plus lente reste à sa cadence.

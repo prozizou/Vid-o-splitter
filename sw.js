@@ -46,7 +46,6 @@ const ASSETS = [
   '/turbo-join.js',
   '/silence.js',
   '/media.js',
-  '/sfx.js',
   '/sw-register.js',
   '/style.css',
   '/manifest.webmanifest',
