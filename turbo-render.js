@@ -15,6 +15,7 @@ import {
 import {
   loadMP4Box, loadMuxer, createSampleStream,
   videoDescription, audioDescription, audioBitrate, aacDecoderCodec, createGopPrimer,
+  monotonicVideoChunk,
 } from './turbo-mp4.js';
 import { align16, MAX_FPS, pickVideoConfig } from './turbo-video.js';
 import { applyEQ } from './turbo-audio.js';
@@ -277,8 +278,16 @@ async function renderAllOnce(file, parts, opts, cb, accel) {
       firstTimestampBehavior: 'cross-track-offset',
     });
 
+    // Filet de sécurité : voir monotonicVideoChunk() dans turbo-mp4.js. Compté
+    // pour le journal de fin de partie, pas pour interrompre quoi que ce soit.
+    let lastMuxTs = -Infinity, muxFixed = 0;
     const venc = new VideoEncoder({
-      output: guarded(sink, 'Multiplexage vidéo', (chunk, meta) => muxer.addVideoChunk(chunk, meta)),
+      output: guarded(sink, 'Multiplexage vidéo', (chunk, meta) => {
+        const safe = monotonicVideoChunk(chunk, lastMuxTs);
+        if (safe !== chunk) muxFixed++;
+        lastMuxTs = safe.timestamp;
+        muxer.addVideoChunk(safe, meta);
+      }),
       error: e => sink.fail(e, 'Encodage vidéo'),
     });
     venc.configure(encCfg);
@@ -597,6 +606,10 @@ async function renderAllOnce(file, parts, opts, cb, accel) {
       cb.onLog(`   partie ${part.index + 1} : ${framesOut} image(s), ` +
                `${(audioSamples / (aSR || 1)).toFixed(1)} s d'audio${abNote}` +
                (planarRefused ? ' — audio désentrelacé sur repli' : ''));
+      if (muxFixed > 0) {
+        cb.onLog(`   ↳ ${muxFixed} horodatage(s) vidéo légèrement réordonné(s) par ` +
+                 `l'encodeur matériel, stabilisé(s) au multiplexage (voir monotonicVideoChunk).`);
+      }
     }
 
     const blob = new Blob([target.buffer], { type: 'video/mp4' });

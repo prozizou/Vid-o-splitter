@@ -210,6 +210,43 @@ export function snapshotSample(s) {
   };
 }
 
+/**
+ * Garantit un DTS strictement croissant en sortie de `VideoEncoder`.
+ *
+ * `latencyMode: 'realtime'` (voir pickVideoConfig, turbo-video.js) demande à
+ * l'encodeur de NE PAS réordonner ses paquets pour des images B, mais reste
+ * un INDICE, pas une garantie. Sur certains encodeurs MATÉRIELS Android
+ * (MediaCodec), avec le profil High (avc1.640033, notre premier candidat de
+ * codec, qui autorise explicitement les images B), un paquet finit parfois
+ * quand même par sortir avec un horodatage qui recule LÉGÈREMENT — quelques
+ * centaines de microsecondes, pas un GOP entier — par rapport au précédent.
+ * `mp4-muxer` n'accepte aucun DTS décroissant :
+ *
+ *   Timestamps must be monotonically increasing (DTS went from X to Y)
+ *
+ * ...et cette exception, remontée via `guarded()` (voir turbo-render.js),
+ * interrompait net le moteur turbo en plein multiplexage — après avoir déjà
+ * décodé et réencodé l'essentiel de la partie, pour rien.
+ *
+ * On repousse donc tout paquet non strictement croissant au minimum
+ * nécessaire (le précédent + 1 µs). Le décalage est imperceptible — bien
+ * plus court qu'une image — et infiniment préférable à l'échec sec, ou au
+ * repli sur ffmpeg.wasm (~5x plus lent).
+ *
+ * @param chunk   EncodedVideoChunk tel que produit par VideoEncoder.
+ * @param afterTs horodatage (µs) du DERNIER chunk déjà remis au muxer.
+ * @returns le chunk original si son timestamp est déjà > `afterTs`, sinon un
+ *   CLONE (mêmes octets, même type, même durée) dont le timestamp est ajusté.
+ */
+export function monotonicVideoChunk(chunk, afterTs) {
+  if (chunk.timestamp > afterTs) return chunk;
+  const data = new Uint8Array(chunk.byteLength);
+  chunk.copyTo(data);
+  const init = { type: chunk.type, timestamp: afterTs + 1, data };
+  if (chunk.duration != null) init.duration = chunk.duration;
+  return new EncodedVideoChunk(init);
+}
+
 async function createSampleStream(file, MP4Box, wanted) {
   const mp4 = MP4Box.createFile();
   const queue = [];
@@ -264,4 +301,7 @@ async function createSampleStream(file, MP4Box, wanted) {
   }
 }
 
-export { loadMP4Box, loadMuxer, videoDescription, audioDescription, audioBitrate, aacDecoderCodec, createSampleStream };
+export {
+  loadMP4Box, loadMuxer, videoDescription, audioDescription, audioBitrate, aacDecoderCodec,
+  createSampleStream,
+};
