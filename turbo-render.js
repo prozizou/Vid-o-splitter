@@ -19,10 +19,11 @@ import {
 } from './turbo-mp4.js';
 import { align16, MAX_FPS, pickVideoConfig } from './turbo-video.js';
 import { applyEQ } from './turbo-audio.js';
+import { mixBg } from './bgm.js';
 
 /**
  * @param parts  [{ index, t0, t1, segs: [[s,e],...] }]  (secondes)
- * @param opts   { crf, eq, audioFadeSec }
+ * @param opts   { crf, eq, audioFadeSec, bgm: {type, gainDb} }
  * @param cb     { onPartStart, onPartDone, onProgress, shouldStop }
  */
 /**
@@ -522,6 +523,13 @@ async function renderAllOnce(file, parts, opts, cb, accel) {
       pieces.forEach(c => (c.length = 0));
       pieceSeg.length = 0;
       channels = await applyEQ(channels, aSR, opts.eq);
+
+      // Son de fond, mélangé APRÈS l'égaliseur : il n'est jamais coloré par
+      // les réglages de voix. Couvre toute la partie (pas seulement les
+      // raccords, contrairement à l'ancien son de transition).
+      if (opts.bgm && opts.bgm.type !== 'none') {
+        mixBg(channels, aSR, opts.bgm.type, opts.bgm.gainDb);
+      }
 
       const aenc = new AudioEncoder({
         output: guarded(sink, 'Multiplexage audio', (chunk, meta) => muxer.addAudioChunk(chunk, meta)),

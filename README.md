@@ -21,12 +21,13 @@ journal (copie / enregistrement).
 
 ### Modules purs (testes)
 
-`silence.js` ne touche ni au DOM ni aux API du navigateur (seuil adaptatif,
-detection des silences, decoupage en parties), et est couvert par `npm test`
-(lanceur integre de Node, aucune dependance a installer) aux cotes des
-briques pures de `turbo.js` :
+`silence.js` (seuil adaptatif, detection des silences, decoupage en parties)
+et `bgm.js` (synthese des sons de fond, ecriture WAV) ne touchent ni au DOM ni
+aux API du navigateur, et sont couverts par `npm test` (lanceur integre de
+Node, aucune dependance a installer) aux cotes des briques pures de
+`turbo.js` :
 
-    npm test        # 53 tests, ~0,3 s
+    npm test        # 64 tests, ~0,3 s
 
 ## Apercu des coupes
 
@@ -49,6 +50,29 @@ ne derape pas. Une video dont le bruit de fond change en cours de route
 (fenetre ouverte, changement de piece) n'est donc plus mal segmentee de bout en
 bout. Une hysterese legere (0,8) evite le papillonnement d'un signal qui frole
 le seuil ; la temporisation, elle, reste assuree par « silence minimum ».
+
+## Son de fond (bgm.js)
+
+Panneau **Son de fond** sur `/splitter`. Fichier : `bgm.js`.
+
+Une ambiance continue (Bruit rose doux, Pluie légère, Nappe ambiante, Vagues
+lointaines), synthétisée à la volée — aucun fichier audio n'est téléchargé
+(bruit deterministe, pas de `Math.random` : le rendu est identique a chaque
+passage). Contrairement à l'ancien son de transition (v6.1, retiré), elle
+couvre **toute** la durée conservée, pas seulement les raccords : calculée
+d'un bout à l'autre en une seule passe, jamais par répétition d'une boucle
+courte, donc aucun point de bouclage audible. Volume réglable (-40 à -6 dB,
+-24 dB par défaut : c'est un fond, pas de la musique au premier plan). Bouton
+d'écoute (3 s) pour choisir sans rien traiter.
+
+Les deux moteurs produisent le même mélange :
+- **turbo** : mélangé directement dans le PCM, après l'égaliseur (`mixBg`).
+- **ffmpeg** : un WAV continu de la durée de la partie, mixé via
+  `amix=normalize=0` (la voix n'est pas baissée). Repli automatique sans
+  ambiance si `amix` échoue.
+
+Chaque partie est rendue indépendamment : le son de fond reprend donc à zéro
+à chaque couture entre parties (comme le reste du traitement par parties).
 
 ## Egaliseur voix : coherence entre moteurs
 

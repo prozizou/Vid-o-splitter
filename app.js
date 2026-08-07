@@ -3,6 +3,7 @@
 // entier — donc la page entière, moteur turbo compris. Il est chargé à la
 // demande dans getFFmpeg().
 import { turboSupported, turboAnalyze, turboRenderAll, turboJoin, turboMerge, WHINE_NOTCHES, bitrateFor, align16 } from './turbo.js';
+import { BGM_TYPES, makeBgWav } from './bgm.js';
 import { segmentsFromLoud, thresholdCurve, planChunks, loudFromPCM } from './silence.js';
 import { fmtSize, fmtTime, probeDuration, attachLogTools } from './media.js';
 
@@ -17,6 +18,8 @@ const CONFIG = {
   absFloor:      0.004,  // plancher d'amplitude absolu
   crf:           23,     // qualité vidéo : bas = meilleure qualité (ajustée par le préréglage réseau social, voir SOCIAL_PRESETS)
   chunkMode:     'auto', // 'auto' | 'off' | durée d'une partie en secondes
+  bgmType:       'none', // son de fond (voir BGM_TYPES)
+  bgmGainDb:     -24,    // volume du son de fond : bas par défaut, c'est un fond, pas de la musique au premier plan
   socialPreset:  'tiktok', // réseau social visé (voir SOCIAL_PRESETS) : pilote la conversion ET la qualité suggérée
 };
 
@@ -427,6 +430,48 @@ if (socialSel) {
   const initialCrf = (SOCIAL_PRESETS[CONFIG.socialPreset] || SOCIAL_PRESETS.source).crf;
   if (initialCrf != null) setCrf(initialCrf);
 }
+
+// --- Son de fond ---
+const bgmSel = $('bgm'), bgmGain = $('bgmGain'), bgmGainVal = $('bgmGainVal'), bgmTest = $('bgmTest');
+
+for (const [k, label] of Object.entries(BGM_TYPES)) {
+  const o = document.createElement('option');
+  o.value = k; o.textContent = label;
+  bgmSel.appendChild(o);
+}
+bgmSel.value = CONFIG.bgmType;
+
+const bgmTag = $('bgmTag');
+function paintBgm() {
+  const on = CONFIG.bgmType !== 'none';
+  bgmTag.textContent = on ? BGM_TYPES[CONFIG.bgmType] : 'Aucun';
+  bgmTag.classList.toggle('tag-on', on);
+}
+bgmSel.addEventListener('change', () => {
+  CONFIG.bgmType = bgmSel.value;
+  bgmTest.disabled = CONFIG.bgmType === 'none';
+  bgmGain.disabled = CONFIG.bgmType === 'none';
+  paintBgm();
+});
+bgmGain.addEventListener('input', () => { CONFIG.bgmGainDb = +bgmGain.value; bgmGainVal.textContent = `${CONFIG.bgmGainDb} dB`; });
+bgmGainVal.textContent = `${CONFIG.bgmGainDb} dB`;
+bgmTest.disabled = true; bgmGain.disabled = true;
+paintBgm();
+
+// Écoute de l'ambiance choisie (3 s), sans rien traiter.
+bgmTest.addEventListener('click', async () => {
+  if (CONFIG.bgmType === 'none') return;
+  const { renderBgm } = await import('./bgm.js');
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const s = renderBgm(CONFIG.bgmType, ctx.sampleRate, Math.round(ctx.sampleRate * 3));
+  const buf = ctx.createBuffer(1, s.length, ctx.sampleRate);
+  const d = buf.getChannelData(0);
+  const g = Math.pow(10, CONFIG.bgmGainDb / 20) * 6; // remonté pour l'écoute seule
+  for (let i = 0; i < s.length; i++) d[i] = Math.max(-1, Math.min(1, s[i] * g));
+  const src = ctx.createBufferSource();
+  src.buffer = buf; src.connect(ctx.destination); src.start();
+  src.onended = () => ctx.close().catch(() => {});
+});
 
 // --- Choix du moteur ---
 //
@@ -1048,7 +1093,7 @@ function queueCutsRefresh() {
   requestAnimationFrame(() => { cutsQueued = false; refreshCuts(); });
 }
 
-function buildFilter(segs, offset, chain) {
+function buildFilter(segs, offset, chain, hasBg) {
   const parts = [];
   segs.forEach(([s, e], i) => {
     const S = Math.max(0, s - offset);
@@ -1065,7 +1110,16 @@ function buildFilter(segs, offset, chain) {
   });
   const inputs = segs.map((_, i) => `[v${i}][a${i}]`).join('');
   let g = `${parts.join(';')};${inputs}concat=n=${segs.length}:v=1:a=1[outv][araw]`;
-  g += chain.length ? `;[araw]${chain.join(',')}[outa]` : ';[araw]anull[outa]';
+  g += chain.length ? `;[araw]${chain.join(',')}[aeq]` : ';[araw]anull[aeq]';
+
+  if (hasBg) {
+    // Le son de fond est une 2e entrée : on aligne format et débit avant amix.
+    // Attention : [a0]..[aN] sont déjà pris par les segments, d'où [mixA]/[mixB].
+    const fmt = 'aformat=sample_rates=44100:channel_layouts=stereo';
+    g += `;[aeq]${fmt}[mixA];[1:a]${fmt}[mixB];[mixA][mixB]amix=inputs=2:duration=first:normalize=0[outa]`;
+  } else {
+    g += ';[aeq]anull[outa]';
+  }
   return g;
 }
 
@@ -1073,46 +1127,68 @@ function buildFilter(segs, offset, chain) {
 async function renderChunk(ff, inPath, c) {
   const name = `part_${String(c.index).padStart(3, '0')}.mp4`;
 
-  const argsFor = chain => [
-    '-ss', c.t0.toFixed(3),
-    '-t', (c.t1 - c.t0).toFixed(3),
-    '-i', inPath,
-    '-filter_complex', buildFilter(c.segs, c.t0, chain),
-    '-map', '[outv]', '-map', '[outa]',
-    '-threads', '0',
-    ...V_ARGS, '-crf', String(CONFIG.crf),
-    ...A_ARGS,
-    '-movflags', '+faststart',
-    name,
-  ];
-
-  // Repli automatique : son+EQ -> son+biquad -> rien.
-  const ladder = [];
-  if (EQ.linear) ladder.push({ chain: audioChain(true) });
-  ladder.push({ chain: audioChain(false), note: EQ.linear ? '⚠️ Phase linéaire indisponible : égaliseur classique utilisé.' : null });
-  ladder.push({ chain: [], note: '⚠️ Filtres audio indisponibles : partie encodée sans traitement.' });
-
-  let lastErr = null;
-  for (let i = 0; i < ladder.length; i++) {
-    const step = ladder[i];
-    const prev = ladder[i - 1];
-    if (prev && JSON.stringify(step.chain) === JSON.stringify(prev.chain)) continue;
-    try {
-      await run(ff, argsFor(step.chain));
-      lastErr = null;
-      break;
-    } catch (e) {
-      lastErr = e;
-      try { await ff.deleteFile(name); } catch {}
-      if (i === ladder.length - 1) throw e;
-      log(ladder[i + 1].note || '⚠️ Nouvel essai avec des filtres simplifiés.');
-    }
+  // Son de fond : un WAV continu couvrant toute la durée conservée de la
+  // partie. Une seule entrée supplémentaire pour ffmpeg, mixée via amix.
+  let bgWritten = false;
+  if (CONFIG.bgmType !== 'none') {
+    const partDur = c.segs.reduce((a, [s, e]) => a + (e - s), 0);
+    const { fetchFile } = await import('/vendor/util/index.js');
+    const wav = makeBgWav(partDur, 44100, CONFIG.bgmType, CONFIG.bgmGainDb);
+    await ff.writeFile('bg.wav', await fetchFile(wav));
+    bgWritten = true;
   }
-  if (lastErr) throw lastErr;
 
-  const data = await ff.readFile(name);
-  try { await ff.deleteFile(name); } catch {}
-  return new Blob([data.buffer], { type: 'video/mp4' });
+  const argsFor = (chain, hasBg) => {
+    const args = [
+      '-ss', c.t0.toFixed(3),
+      '-t', (c.t1 - c.t0).toFixed(3),
+      '-i', inPath,
+    ];
+    if (hasBg) args.push('-i', 'bg.wav');
+    args.push(
+      '-filter_complex', buildFilter(c.segs, c.t0, chain, hasBg),
+      '-map', '[outv]', '-map', '[outa]',
+      '-threads', '0',
+      ...V_ARGS, '-crf', String(CONFIG.crf),
+      ...A_ARGS,
+      '-movflags', '+faststart',
+      name,
+    );
+    return args;
+  };
+
+  // Repli automatique : son+EQ -> son+biquad -> EQ seul -> rien.
+  const ladder = [];
+  if (EQ.linear) ladder.push({ chain: audioChain(true), bg: bgWritten });
+  ladder.push({ chain: audioChain(false), bg: bgWritten, note: EQ.linear ? '⚠️ Phase linéaire indisponible : égaliseur classique utilisé.' : null });
+  if (bgWritten) ladder.push({ chain: audioChain(false), bg: false, note: '⚠️ Mixage du son de fond impossible : partie rendue sans ambiance.' });
+  ladder.push({ chain: [], bg: false, note: '⚠️ Filtres audio indisponibles : partie encodée sans traitement.' });
+
+  try {
+    let lastErr = null;
+    for (let i = 0; i < ladder.length; i++) {
+      const step = ladder[i];
+      const prev = ladder[i - 1];
+      if (prev && JSON.stringify(step.chain) === JSON.stringify(prev.chain) && step.bg === prev.bg) continue;
+      try {
+        await run(ff, argsFor(step.chain, step.bg));
+        lastErr = null;
+        break;
+      } catch (e) {
+        lastErr = e;
+        try { await ff.deleteFile(name); } catch {}
+        if (i === ladder.length - 1) throw e;
+        log(ladder[i + 1].note || '⚠️ Nouvel essai avec des filtres simplifiés.');
+      }
+    }
+    if (lastErr) throw lastErr;
+
+    const data = await ff.readFile(name);
+    try { await ff.deleteFile(name); } catch {}
+    return new Blob([data.buffer], { type: 'video/mp4' });
+  } finally {
+    if (bgWritten) { try { await ff.deleteFile('bg.wav'); } catch {} }
+  }
 }
 
 // ==================== RÉUNION DES PARTIES ====================
@@ -1316,6 +1392,7 @@ processBtn.addEventListener('click', async () => {
           crf: job.crf,
           output: (SOCIAL_PRESETS[job.socialPreset] || SOCIAL_PRESETS.source).output,
           audioFadeSec: CONFIG.audioFadeSec,
+          bgm: { type: CONFIG.bgmType, gainDb: CONFIG.bgmGainDb },
           eq: { freqs: EQ_FREQS, gains: EQ.gains, q: EQ.q, highpass: EQ.highpass, normalize: EQ.normalize, whineNotch: EQ.whineNotch },
         }, {
           onLog: log,          // diagnostics par partie (images, durée d'audio)
