@@ -1,6 +1,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { snapshotSample, resolveDataStream, withTimeout, createGopPrimer, drainTo, nearestStdFps, align16 } from '../turbo.js';
+import { snapshotSample, resolveDataStream, withTimeout, createGopPrimer, drainTo, nearestStdFps, align16, monotonicVideoChunk } from '../turbo.js';
+
+// Node n'a pas de global EncodedVideoChunk : un mini polyfill suffit, il n'a
+// besoin que de ce que monotonicVideoChunk() lit/appelle (voir plus bas).
+class FakeEncodedVideoChunk {
+  constructor({ type, timestamp, duration, data }) {
+    this.type = type;
+    this.timestamp = timestamp;
+    this.duration = duration ?? null;
+    this._data = data instanceof Uint8Array ? data : new Uint8Array(data);
+  }
+  get byteLength() { return this._data.byteLength; }
+  copyTo(dest) { dest.set(this._data); }
+}
+globalThis.EncodedVideoChunk ??= FakeEncodedVideoChunk;
 
 /**
  * Régression : le moteur turbo n'a jamais pu démarrer parce que les
@@ -341,4 +355,67 @@ test('align16 ne descend jamais sous 16', () => {
   assert.equal(align16(15), 16);
   assert.equal(align16(1), 16);
   assert.equal(align16(0), 16);
+});
+
+/**
+ * Regression (cas reel signale) : "Multiplexage vidéo : Timestamps must be
+ * monotonically increasing (DTS went from 86200037 to 86199454)" — un
+ * encodeur materiel Android en profil High (avc1.640033) a laisse ressortir
+ * un paquet legerement en retard sur le precedent, malgre
+ * `latencyMode: 'realtime'`. mp4-muxer rejette tout DTS decroissant : le
+ * moteur turbo s'interrompait net en plein rendu. monotonicVideoChunk() est
+ * le filet de securite qui empeche ça d'arriver jusqu'au muxer.
+ */
+function fakeChunk(type, timestamp, duration, octets = [1, 2, 3]) {
+  return new FakeEncodedVideoChunk({ type, timestamp, duration, data: new Uint8Array(octets) });
+}
+
+test('monotonicVideoChunk laisse passer un chunk deja croissant, sans le cloner', () => {
+  const c = fakeChunk('delta', 1000, 33333);
+  assert.equal(monotonicVideoChunk(c, 500), c, 'aucune copie quand ce n\'est pas necessaire');
+});
+
+test('cas reel signale : un DTS qui recule est repousse juste apres le precedent', () => {
+  const c = fakeChunk('delta', 86_199_454, 33_333);
+  const fixe = monotonicVideoChunk(c, 86_200_037);
+  assert.equal(fixe.timestamp, 86_200_038, 'strictement croissant, decalage minimal');
+  assert.notEqual(fixe, c, 'le chunk original ne peut pas etre modifie : il faut un clone');
+});
+
+test('un DTS EGAL au precedent est aussi repousse (strictement croissant, pas juste non decroissant)', () => {
+  const c = fakeChunk('delta', 5000, 1000);
+  const fixe = monotonicVideoChunk(c, 5000);
+  assert.equal(fixe.timestamp, 5001);
+});
+
+test('le clone garde le type, la duree et les octets du chunk original', () => {
+  const c = fakeChunk('key', 100, 33333, [9, 8, 7, 6]);
+  const fixe = monotonicVideoChunk(c, 200);
+  assert.equal(fixe.type, 'key');
+  assert.equal(fixe.duration, 33333);
+  const octets = new Uint8Array(fixe.byteLength);
+  fixe.copyTo(octets);
+  assert.deepEqual(Array.from(octets), [9, 8, 7, 6]);
+});
+
+test('une duree absente (null) n\'est pas forcee a 0 sur le clone', () => {
+  const c = fakeChunk('delta', 100, null);
+  const fixe = monotonicVideoChunk(c, 200);
+  assert.equal(fixe.duration, null);
+});
+
+test('des DTS repousses restent croissants sur plusieurs paquets consecutifs', () => {
+  // Reproduit la boucle de turbo-render.js : chaque sortie est comparee au
+  // DERNIER horodatage deja remis au muxer, pas au chunk original.
+  let last = -Infinity;
+  const horodatages = [0, 33333, 33200, 33100, 99999]; // deux reculs de suite
+  const sortie = horodatages.map(ts => {
+    const fixe = monotonicVideoChunk(fakeChunk('delta', ts, 33333), last);
+    last = fixe.timestamp;
+    return fixe.timestamp;
+  });
+  for (let i = 1; i < sortie.length; i++) {
+    assert.ok(sortie[i] > sortie[i - 1], `doit croître : ${sortie[i - 1]} -> ${sortie[i]}`);
+  }
+  assert.deepEqual(sortie, [0, 33333, 33334, 33335, 99999]);
 });

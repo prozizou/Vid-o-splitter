@@ -36,5 +36,5 @@ export { turboJoin, turboMerge } from './turbo-join.js';
 // Exporté en plus pour la suite de tests (`npm test`), qui exerce ces briques
 // pures et utilitaires en isolation.
 export { withTimeout, drainTo } from './turbo-util.js';
-export { snapshotSample, resolveDataStream, createGopPrimer } from './turbo-mp4.js';
+export { snapshotSample, resolveDataStream, createGopPrimer, monotonicVideoChunk } from './turbo-mp4.js';
 export { nearestStdFps, align16, bitrateFor } from './turbo-video.js';
