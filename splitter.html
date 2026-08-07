@@ -108,6 +108,23 @@
     </div>
   </div>
 
+  <details class="panel" id="bgmPanel">
+    <summary>🎵 Son de fond <span class="tag" id="bgmTag">Aucun</span></summary>
+
+    <div class="control">
+      <label for="bgm">Ambiance</label>
+      <select id="bgm"></select>
+    </div>
+
+    <div class="control">
+      <label>Volume <b id="bgmGainVal">-24 dB</b></label>
+      <input type="range" id="bgmGain" min="-40" max="-6" step="1" value="-24">
+      <small class="hint">Mélangé sous la voix, après l'égaliseur, sur toute la durée. Volume bas par défaut : c'est un fond, pas de la musique au premier plan.</small>
+    </div>
+
+    <button class="btn btn-ghost btn-small" id="bgmTest" type="button">🔊 Écouter l'ambiance</button>
+  </details>
+
   <details class="panel" id="eqPanel">
     <summary>🎚️ Égaliseur voix <span class="tag" id="eqTag">Neutre</span></summary>
 
