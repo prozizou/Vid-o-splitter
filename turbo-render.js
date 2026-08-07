@@ -19,11 +19,10 @@ import {
 } from './turbo-mp4.js';
 import { align16, MAX_FPS, pickVideoConfig } from './turbo-video.js';
 import { applyEQ } from './turbo-audio.js';
-import { mixBed, alphaAt } from './sfx.js';
 
 /**
  * @param parts  [{ index, t0, t1, segs: [[s,e],...] }]  (secondes)
- * @param opts   { crf, eq, audioFadeSec, videoFadeSec, sfx: {type, gainDb} }
+ * @param opts   { crf, eq, audioFadeSec }
  * @param cb     { onPartStart, onPartDone, onProgress, shouldStop }
  */
 /**
@@ -220,11 +219,10 @@ async function renderAllOnce(file, parts, opts, cb, accel) {
 
   let processedSec = 0;
 
-  // Toile hors écran : assombrit les images du fondu, et/ou rogne au multiple
-  // de 16 exigé par le matériel (voir encW/encH plus haut).
-  const fadeUs = Math.round((opts.videoFadeSec || 0) * US);
+  // Toile hors écran : rogne au multiple de 16 exigé par le matériel (voir
+  // encW/encH plus haut).
   let canvas = null, ctx2d = null;
-  if (fadeUs > 0 || needsCrop) {
+  if (needsCrop) {
     canvas = new OffscreenCanvas(encW, encH);
     ctx2d = canvas.getContext('2d', { alpha: false });
   }
@@ -232,7 +230,7 @@ async function renderAllOnce(file, parts, opts, cb, accel) {
   // --- Boucle sur les parties ---------------------------------------
   for (let pi = 0; pi < parts.length; pi++) {
     const part = parts[pi];
-    const isFirst = pi === 0, isLast = pi === parts.length - 1;
+    const isLast = pi === parts.length - 1;
     if (cb.shouldStop && cb.shouldStop()) break;
     if (part.status === 'done') { processedSec += part.kept; continue; }
     cb.onPartStart && cb.onPartStart(part);
@@ -246,15 +244,6 @@ async function renderAllOnce(file, parts, opts, cb, accel) {
     }
     const partDurUs = Math.round(off * US);
     const inRange = ts => map.find(m => ts >= m.s && ts < m.e);
-
-    // Instants des raccords, en sortie. On ne fond pas le tout début du film
-    // ni sa toute fin : seulement les coupes internes et les coutures de parties.
-    const fadePts = [];
-    map.forEach((m, i) => { if (!(i === 0 && isFirst)) fadePts.push(m.off); });
-    if (!isLast) fadePts.push(partDurUs);
-    const sfxPtsSec = map
-      .filter((_, i) => !(i === 0 && isFirst))
-      .map(m => m.off / US);
 
     const target = new ArrayBufferTarget();
     const muxer = new Muxer({
@@ -318,28 +307,12 @@ async function renderAllOnce(file, parts, opts, cb, accel) {
         cb.onProgress(processedSec + emittedUs / US);
       }
 
-      // Fondu au noir très bref de part et d'autre de chaque raccord.
-      const alpha = fadeUs ? alphaAt(outTs, fadePts, fadeUs) : 1;
       let out;
-      if (alpha < 0.999) {
-        ctx2d.globalAlpha = 1;
-        ctx2d.fillStyle = '#000';
-        ctx2d.fillRect(0, 0, encW, encH);
-        ctx2d.globalAlpha = alpha;
+      if (needsCrop) {
         // Forme a 9 arguments : echantillonne le rectangle source (srcX,srcY,
         // srcW,srcH) vers tout le cadre encW×encH. En conversion, c'est une mise
         // a l'echelle « cover » ; sans conversion, srcW/srcH valent encW/encH
-        // (rognage de quelques px, pas d'etirement), et le tout est un no-op
-        // quand encW/encH valent W/H.
-        ctx2d.drawImage(frame, srcX, srcY, srcW, srcH, 0, 0, encW, encH);
-        out = new VideoFrame(canvas, { timestamp: outTs, duration: dur });
-      } else if (needsCrop) {
-        // IMPORTANT : la branche du fondu ci-dessus laisse globalAlpha < 1. Sans
-        // ce retour a 1, l'image suivante (non fondue) etait dessinee semi
-        // transparente par-dessus le contenu precedent de la toile — d'ou des
-        // images sombres/noires apres chaque raccord des que la toile sert a
-        // TOUTES les images (conversion active, ou source non alignee sur 16).
-        ctx2d.globalAlpha = 1;
+        // (rognage de quelques px, pas d'etirement).
         ctx2d.drawImage(frame, srcX, srcY, srcW, srcH, 0, 0, encW, encH);
         out = new VideoFrame(canvas, { timestamp: outTs, duration: dur });
       } else {
@@ -549,11 +522,6 @@ async function renderAllOnce(file, parts, opts, cb, accel) {
       pieces.forEach(c => (c.length = 0));
       pieceSeg.length = 0;
       channels = await applyEQ(channels, aSR, opts.eq);
-
-      // Le son de transition passe APRÈS l'égaliseur : il n'est pas coloré.
-      if (opts.sfx && opts.sfx.type !== 'none') {
-        mixBed(channels, aSR, sfxPtsSec, opts.sfx.type, opts.sfx.gainDb);
-      }
 
       const aenc = new AudioEncoder({
         output: guarded(sink, 'Multiplexage audio', (chunk, meta) => muxer.addAudioChunk(chunk, meta)),

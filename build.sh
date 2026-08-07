@@ -16,7 +16,7 @@ mkdir -p dist/vendor
 cp index.html splitter.html \
    app.js turbo.js turbo-util.js turbo-mp4.js turbo-video.js \
    turbo-audio.js turbo-render.js turbo-join.js \
-   silence.js media.js sfx.js sw-register.js \
+   silence.js media.js sw-register.js \
    style.css manifest.webmanifest sw.js dist/
 cp -R icons dist/icons
 
@@ -129,7 +129,6 @@ REQUIRED=(
   "dist/turbo-render.js"
   "dist/silence.js"
   "dist/media.js"
-  "dist/sfx.js"
   "dist/sw-register.js"
   "dist/sw.js"
   "dist/vendor/ffmpeg/index.js"
