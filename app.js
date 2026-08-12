@@ -374,6 +374,7 @@ async function saveJobMeta() {
   await dbPut(META, 'job', {
     key: job.key, duration: job.duration,
     socialPreset: job.socialPreset, crf: job.crf, engine: job.engine,
+    bgm: job.bgm, eq: job.eq,
     chunks: job.chunks.map(c => ({ t0: c.t0, t1: c.t1, kept: c.kept, status: c.status === 'done' ? 'done' : 'pending' })),
   });
 }
@@ -621,25 +622,29 @@ $('eqReset').addEventListener('click', () => applyPreset('flat'));
 paintEQ();
 
 // Chaîne de filtres audio appliquée APRÈS le recollage des segments.
-function audioChain(linear) {
+// Prend `eq` en paramètre (au lieu de lire l'objet EQ global directement) :
+// le rendu doit utiliser les réglages FIGÉS au lancement du job (job.eq),
+// pas ceux affichés à l'écran au moment où la partie est encodée — voir le
+// commentaire sur job = {...} dans processBtn.
+function audioChain(linear, eq) {
   const f = [];
-  if (EQ.highpass) f.push('highpass=f=85');
+  if (eq.highpass) f.push('highpass=f=85');
   // Avant l'egaliseur/dynaudnorm : meme raison que dans turbo.js applyEQ,
   // inutile de laisser un normaliseur amplifier un sifflement qu'on retire.
-  if (EQ.whineNotch) {
+  if (eq.whineNotch) {
     WHINE_NOTCHES.forEach(({ freq, q }) => f.push(`bandreject=f=${freq}:width_type=q:w=${q}`));
   }
-  const active = EQ_FREQS.map((freq, i) => ({ freq, g: EQ.gains[i] })).filter(b => b.g !== 0);
+  const active = EQ_FREQS.map((freq, i) => ({ freq, g: eq.gains[i] })).filter(b => b.g !== 0);
   if (active.length) {
     if (linear) {
       // firequalizer = phase linéaire (pas de déphasage entre les bandes)
       const entries = active.map(b => `entry(${b.freq},${b.g})`).join(';');
       f.push(`firequalizer=gain_entry='${entries}'`);
     } else {
-      active.forEach(b => f.push(`equalizer=f=${b.freq}:width_type=q:width=${EQ.q}:g=${b.g}`));
+      active.forEach(b => f.push(`equalizer=f=${b.freq}:width_type=q:width=${eq.q}:g=${b.g}`));
     }
   }
-  if (EQ.normalize) f.push('dynaudnorm=f=250:g=7');
+  if (eq.normalize) f.push('dynaudnorm=f=250:g=7');
   return f;
 }
 
@@ -1016,7 +1021,30 @@ async function tryResume() {
     socialPreset: meta.socialPreset || CONFIG.socialPreset,
     crf: meta.crf ?? CONFIG.crf,
     engine: meta.engine || engine,
+    bgm: meta.bgm || { type: CONFIG.bgmType, gainDb: CONFIG.bgmGainDb },
+    eq: meta.eq || { gains: [...EQ.gains], q: EQ.q, highpass: EQ.highpass, normalize: EQ.normalize, whineNotch: EQ.whineNotch, linear: EQ.linear },
   };
+
+  // BUG corrigé : CONFIG.bgmType et EQ ne sont PAS persistés (rien à voir
+  // avec job, sauvegardé dans IndexedDB) — après un rechargement de page, ils
+  // repartaient à leurs valeurs par défaut (aucune ambiance, égaliseur plat)
+  // alors que job.bgm/job.eq (restaurés ci-dessus) restent ceux du lancement
+  // d'origine. Les parties restantes étaient donc rendues sans le son de
+  // fond ni l'égaliseur choisis, sans que rien ne le signale. On resynchronise
+  // ici le panneau visible sur ce qui sera RÉELLEMENT rendu.
+  CONFIG.bgmType = job.bgm.type; CONFIG.bgmGainDb = job.bgm.gainDb;
+  bgmSel.value = CONFIG.bgmType;
+  bgmGain.value = CONFIG.bgmGainDb; bgmGainVal.textContent = `${CONFIG.bgmGainDb} dB`;
+  bgmTest.disabled = CONFIG.bgmType === 'none'; bgmGain.disabled = CONFIG.bgmType === 'none';
+  paintBgm();
+  if (isBgmAudioType(CONFIG.bgmType)) preloadBgmAudio(CONFIG.bgmType).catch(() => {});
+
+  // Copie du tableau gains : EQ et job.eq ne doivent JAMAIS partager la même
+  // référence, sinon bouger un curseur après la reprise muterait aussi les
+  // réglages figés dans job (ceux réellement utilisés par le rendu en cours).
+  Object.assign(EQ, job.eq, { gains: [...job.eq.gains], preset: 'custom' });
+  paintEQ();
+
   renderParts();
   if (doneCount === chunks.length) {
     processBtn.textContent = '🔁 Retraiter la vidéo';
@@ -1310,21 +1338,31 @@ function buildFilter(segs, offset, chain, hasBg) {
 }
 
 // ==================== RENDU D'UNE PARTIE ====================
+// BUG corrigé : bgm/eq/crf lisaient CONFIG/EQ EN DIRECT au moment de coder
+// chaque partie, au lieu des réglages FIGÉS dans `job` au lancement (voir le
+// commentaire sur job = {...} dans processBtn : « pas relus depuis CONFIG à
+// chaque appel »). Une reprise après pause (ou simplement le temps que les
+// parties précédentes s'encodent pendant que l'utilisateur retouche un
+// curseur) rendait donc les parties restantes avec d'autres réglages que
+// ceux affichés au lancement — voire sans égaliseur ni son de fond du tout,
+// puisqu'un rechargement de page remet CONFIG.bgmType/EQ à leurs valeurs par
+// défaut (aucune persistance) alors que job, lui, survit dans IndexedDB.
 async function renderChunk(ff, inPath, c) {
   const name = `part_${String(c.index).padStart(3, '0')}.mp4`;
+  const { bgm, eq, crf } = job;
 
   // Son de fond : un WAV continu couvrant toute la durée conservée de la
   // partie. Une seule entrée supplémentaire pour ffmpeg, mixée via amix.
   let bgWritten = false;
-  if (CONFIG.bgmType !== 'none') {
+  if (bgm.type !== 'none') {
     const partDur = c.segs.reduce((a, [s, e]) => a + (e - s), 0);
     const { fetchFile } = await import('/vendor/util/index.js');
     // Ambiances enregistrées (bgm-audio.js) vs synthétisées (bgm.js) : même
     // WAV mono en sortie, source différente. makeBgAudioWav précharge si le
     // cache n'était pas déjà chaud (ne devrait pas arriver, voir processBtn).
-    const wav = isBgmAudioType(CONFIG.bgmType)
-      ? await makeBgAudioWav(partDur, 44100, CONFIG.bgmType, CONFIG.bgmGainDb)
-      : makeBgWav(partDur, 44100, CONFIG.bgmType, CONFIG.bgmGainDb);
+    const wav = isBgmAudioType(bgm.type)
+      ? await makeBgAudioWav(partDur, 44100, bgm.type, bgm.gainDb)
+      : makeBgWav(partDur, 44100, bgm.type, bgm.gainDb);
     await ff.writeFile('bg.wav', await fetchFile(wav));
     bgWritten = true;
   }
@@ -1340,7 +1378,7 @@ async function renderChunk(ff, inPath, c) {
       '-filter_complex', buildFilter(c.segs, c.t0, chain, hasBg),
       '-map', '[outv]', '-map', '[outa]',
       '-threads', '0',
-      ...V_ARGS, '-crf', String(CONFIG.crf),
+      ...V_ARGS, '-crf', String(crf),
       ...A_ARGS,
       '-movflags', '+faststart',
       name,
@@ -1350,9 +1388,9 @@ async function renderChunk(ff, inPath, c) {
 
   // Repli automatique : son+EQ -> son+biquad -> EQ seul -> rien.
   const ladder = [];
-  if (EQ.linear) ladder.push({ chain: audioChain(true), bg: bgWritten });
-  ladder.push({ chain: audioChain(false), bg: bgWritten, note: EQ.linear ? '⚠️ Phase linéaire indisponible : égaliseur classique utilisé.' : null });
-  if (bgWritten) ladder.push({ chain: audioChain(false), bg: false, note: '⚠️ Mixage du son de fond impossible : partie rendue sans ambiance.' });
+  if (eq.linear) ladder.push({ chain: audioChain(true, eq), bg: bgWritten });
+  ladder.push({ chain: audioChain(false, eq), bg: bgWritten, note: eq.linear ? '⚠️ Phase linéaire indisponible : égaliseur classique utilisé.' : null });
+  if (bgWritten) ladder.push({ chain: audioChain(false, eq), bg: false, note: '⚠️ Mixage du son de fond impossible : partie rendue sans ambiance.' });
   ladder.push({ chain: [], bg: false, note: '⚠️ Filtres audio indisponibles : partie encodée sans traitement.' });
 
   try {
@@ -1563,10 +1601,14 @@ processBtn.addEventListener('click', async () => {
         // Réglages figés au moment où LE JOB EST CRÉÉ, pas relus depuis CONFIG
         // à chaque appel : sinon changer le réseau social ou le CRF entre une
         // pause et une reprise produirait des parties encodées avec des
-        // réglages différents dans un même fichier final.
+        // réglages différents dans un même fichier final. bgm/eq DOIVENT être
+        // figés ici pour la même raison (voir turboRenderAll/renderChunk plus
+        // bas, qui lisent job.bgm/job.eq — jamais CONFIG.bgmType/EQ en direct).
         job = {
           key: currentKey(), duration, chunks: fresh,
           socialPreset: CONFIG.socialPreset, crf: CONFIG.crf, engine,
+          bgm: { type: CONFIG.bgmType, gainDb: CONFIG.bgmGainDb },
+          eq: { gains: [...EQ.gains], q: EQ.q, highpass: EQ.highpass, normalize: EQ.normalize, whineNotch: EQ.whineNotch, linear: EQ.linear },
         };
       }
       await saveJobMeta();
@@ -1600,8 +1642,16 @@ processBtn.addEventListener('click', async () => {
           crf: job.crf,
           output: (SOCIAL_PRESETS[job.socialPreset] || SOCIAL_PRESETS.source).output,
           audioFadeSec: CONFIG.audioFadeSec,
-          bgm: { type: CONFIG.bgmType, gainDb: CONFIG.bgmGainDb },
-          eq: { freqs: EQ_FREQS, gains: EQ.gains, q: EQ.q, highpass: EQ.highpass, normalize: EQ.normalize, whineNotch: EQ.whineNotch },
+          // BUG corrigé : ces deux lignes lisaient CONFIG.bgmType/EQ EN DIRECT
+          // (l'état affiché à l'écran AU MOMENT du rendu) au lieu des réglages
+          // figés dans job à sa création (voir job = {...} plus haut, et le
+          // même correctif dans renderChunk pour le moteur ffmpeg). Une
+          // reprise après pause/rechargement — CONFIG.bgmType et EQ ne sont
+          // PAS persistés, ils repartent à leurs valeurs par défaut tant que
+          // job (lui, sauvegardé dans IndexedDB) n'a pas été relu — rendait
+          // donc les parties restantes sans égaliseur ni son de fond.
+          bgm: job.bgm,
+          eq: { freqs: EQ_FREQS, ...job.eq },
         }, {
           onLog: log,          // diagnostics par partie (images, durée d'audio)
           shouldStop: () => paused,

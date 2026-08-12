@@ -44,7 +44,13 @@ export async function turboRenderAll(file, parts, opts, cb) {
     return await renderAllOnce(file, parts, opts, cb, 'prefer-hardware');
   } catch (e) {
     const dejaFait = parts.some(p => p.status === 'done');
-    const codec = /decod|encod/i.test(e.message || '');
+    // BUG corrigé : « décod » (avec l'accent, voir les préfixes 'Décodage
+    // vidéo/audio' passés à sink.fail ci-dessous) ne matchait jamais avec
+    // « decod » sans accent — le repli logiciel automatique ne se
+    // déclenchait donc JAMAIS sur un échec de décodage matériel, seulement
+    // sur un échec d'encodage. Un décodeur matériel en échec faisait donc
+    // toujours planter tout le rendu au lieu de retomber sur le logiciel.
+    const codec = /d[ée]cod|encod/i.test(e.message || '');
     if (dejaFait || !codec) throw e;   // rien a gagner a tout recommencer
     if (cb.onLog) {
       cb.onLog(`⚠️ Codec matériel en échec (${e.message}).`);
