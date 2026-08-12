@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { BGM_TYPES, renderBgm, mixBg, makeBgWav } from '../bgm.js';
+import { BGM_TYPES, renderBgm, mixBg, makeBgWav, loopToLength, resampleLinear, mixInto, pcmMonoToWavBlob } from '../bgm.js';
 
 const SR = 48000;
 const peakOf = a => a.reduce((m, v) => Math.max(m, Math.abs(v)), 0);
@@ -117,4 +117,80 @@ test('makeBgWav couvre toute la durée, contrairement à un lit de transitions',
     for (let i = 0; i < SR; i += 37) if (v.getInt16(44 + i * 2, true) !== 0) nonNul++;
     assert.ok(nonNul > 0, 'le fichier ne doit pas être silencieux');
   });
+});
+
+// --- Bouclage en fondu-enchaîné (loopToLength) ------------------------------
+// Utilisé par bgm-audio.js pour étirer un enregistrement (durée fixe) sur
+// toute la durée d'une partie, sans le clic qu'un bouclage brut produirait.
+
+test('loopToLength renvoie exactement n échantillons, plus court ou plus long que la source', () => {
+  const src = new Float32Array(1000).map((_, i) => Math.sin(i));
+  assert.equal(loopToLength(src, SR, 300).length, 300);   // plus court : simple découpe
+  assert.equal(loopToLength(src, SR, 1000).length, 1000);  // pile la longueur de la source
+  assert.equal(loopToLength(src, SR, 5000).length, 5000);  // plus long : bouclé
+});
+
+test('loopToLength : cas limites sans planter', () => {
+  assert.equal(loopToLength(new Float32Array(0), SR, 1000).length, 1000); // source vide -> silence
+  assert.equal(loopToLength(new Float32Array(10), SR, 0).length, 0);
+  assert.equal(loopToLength(new Float32Array(10), SR, -1).length, 0);
+});
+
+test('loopToLength ne dépasse jamais [-1, 1] au raccord de boucle', () => {
+  // Deux crêtes à +1/-1 juste avant/après le raccord : le fondu-enchaîné
+  // (mélange pondéré, jamais une addition) ne doit produire aucun dépassement.
+  const src = new Float32Array(2000).fill(1);
+  const out = loopToLength(src, SR, 6000);
+  assert.ok(out.every(v => v >= -1.0001 && v <= 1.0001), 'jamais hors de [-1, 1]');
+});
+
+test('loopToLength reproduit la source telle quelle quand n est plus court', () => {
+  const src = new Float32Array([0.1, 0.2, 0.3, 0.4, 0.5]);
+  assert.deepEqual(Array.from(loopToLength(src, SR, 3)), Array.from(src.subarray(0, 3)));
+});
+
+// --- Ré-échantillonnage (resampleLinear) ------------------------------------
+
+test('resampleLinear ne touche pas au signal si la fréquence ne change pas', () => {
+  const src = new Float32Array([0.1, -0.2, 0.3]);
+  assert.equal(resampleLinear(src, 44100, 44100), src); // même référence : pas de copie inutile
+});
+
+test('resampleLinear change la longueur proportionnellement au ratio de fréquences', () => {
+  const src = new Float32Array(4410); // 0,1 s à 44100 Hz
+  const out = resampleLinear(src, 44100, 22050);
+  assert.ok(Math.abs(out.length - 2205) <= 1, `longueur ${out.length} attendue proche de 2205`);
+});
+
+test('resampleLinear conserve une rampe simple (interpolation correcte)', () => {
+  const src = new Float32Array(11).map((_, i) => i / 10); // rampe 0 -> 1
+  const out = resampleLinear(src, 10, 20);
+  assert.ok(Math.abs(out[0] - 0) < 1e-6);
+  assert.ok(Math.abs(out[out.length - 1] - 1) < 1e-6);
+  for (let i = 1; i < out.length; i++) assert.ok(out[i] >= out[i - 1] - 1e-9, 'la rampe doit rester croissante');
+});
+
+// --- Briques partagées (mixInto, pcmMonoToWavBlob) --------------------------
+// Utilisées à la fois par mixBg/makeBgWav (ci-dessus) et par bgm-audio.js
+// (mixBgAudio/makeBgAudioWav) : testées ici une fois pour les deux usages.
+
+test('mixInto respecte le gain et écrête sans jamais dépasser [-1, 1]', () => {
+  const ch = [new Float32Array(SR).fill(0)];
+  mixInto(ch, new Float32Array(SR).fill(1), -6);
+  const attendu = Math.pow(10, -6 / 20);
+  assert.ok(Math.abs(ch[0][0] - attendu) < 1e-6);
+  const ch2 = [new Float32Array(SR).fill(0.9)];
+  mixInto(ch2, new Float32Array(SR).fill(0.9), 0);
+  assert.ok(ch2[0].every(v => v <= 1), 'écrêtage à 1');
+});
+
+test('pcmMonoToWavBlob produit un en-tête WAV valide', async () => {
+  const n = SR;
+  const s = new Float32Array(n);
+  const blob = pcmMonoToWavBlob(s, SR);
+  const buf = new Uint8Array(await blob.arrayBuffer());
+  const txt = (o, len) => String.fromCharCode(...buf.slice(o, o + len));
+  assert.equal(txt(0, 4), 'RIFF');
+  assert.equal(txt(8, 4), 'WAVE');
+  assert.equal(buf.length, 44 + n * 2);
 });

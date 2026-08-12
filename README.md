@@ -51,28 +51,44 @@ ne derape pas. Une video dont le bruit de fond change en cours de route
 bout. Une hysterese legere (0,8) evite le papillonnement d'un signal qui frole
 le seuil ; la temporisation, elle, reste assuree par « silence minimum ».
 
-## Son de fond (bgm.js)
+## Son de fond (bgm.js, bgm-audio.js)
 
-Panneau **Son de fond** sur `/splitter`. Fichier : `bgm.js`.
+Panneau **Son de fond** sur `/splitter`. Deux familles dans le même menu :
 
-Une ambiance continue (Bruit rose doux, Pluie légère, Nappe ambiante, Vagues
-lointaines), synthétisée à la volée — aucun fichier audio n'est téléchargé
-(bruit deterministe, pas de `Math.random` : le rendu est identique a chaque
-passage). Contrairement à l'ancien son de transition (v6.1, retiré), elle
-couvre **toute** la durée conservée, pas seulement les raccords : calculée
-d'un bout à l'autre en une seule passe, jamais par répétition d'une boucle
-courte, donc aucun point de bouclage audible. Volume réglable (-40 à -6 dB,
--24 dB par défaut : c'est un fond, pas de la musique au premier plan). Bouton
-d'écoute (3 s) pour choisir sans rien traiter.
+- **Synthétisées** (`bgm.js`) : Bruit rose doux, Pluie légère, Nappe
+  ambiante, Vagues lointaines — générées à la volée, aucun fichier
+  téléchargé (bruit deterministe, pas de `Math.random` : le rendu est
+  identique a chaque passage). Couvre **toute** la durée conservée, calculée
+  d'un bout à l'autre en une seule passe, jamais par répétition d'une boucle
+  courte : aucun point de bouclage audible.
+- **Nature** (`bgm-audio.js`) : Forêt (chants d'oiseaux), Jungle tropicale —
+  de VRAIS enregistrements, servis en same-origin depuis `/audio` (~3,5 Mo
+  chacun, jamais précachés au démarrage : chargés une seule fois au choix
+  dans le panneau, puis mis en cache par le service worker comme les
+  moteurs `/vendor`). Étant d'une durée fixe (quelques minutes), ils sont
+  bouclés avec un **fondu-enchaîné** (`loopToLength`) pour couvrir des
+  parties plus longues, sans clic au raccord.
+
+Volume réglable (-40 à -6 dB, -24 dB par défaut : c'est un fond, pas de la
+musique au premier plan), commun aux deux familles. Bouton d'écoute (3 s)
+pour choisir sans rien traiter.
 
 Les deux moteurs produisent le même mélange :
-- **turbo** : mélangé directement dans le PCM, après l'égaliseur (`mixBg`).
+- **turbo** : mélangé directement dans le PCM, après l'égaliseur (`mixBg` /
+  `mixBgAudio`).
 - **ffmpeg** : un WAV continu de la durée de la partie, mixé via
   `amix=normalize=0` (la voix n'est pas baissée). Repli automatique sans
   ambiance si `amix` échoue.
 
 Chaque partie est rendue indépendamment : le son de fond reprend donc à zéro
 à chaque couture entre parties (comme le reste du traitement par parties).
+
+Les ambiances « Nature » ont besoin de `fetch()` + `AudioContext` pour
+décoder le fichier : `bgm-audio.js` n'est donc pas pur (contrairement à
+`bgm.js`) et n'est pas couvert par `npm test`. Les briques réutilisables
+(mélange, écriture WAV, bouclage en fondu-enchaîné, ré-échantillonnage)
+restent dans `bgm.js`, testées sans dépendance au navigateur ; seuls le
+fetch et le décodage vivent dans `bgm-audio.js`.
 
 ## Egaliseur voix : coherence entre moteurs
 

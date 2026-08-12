@@ -20,6 +20,7 @@ import {
 import { align16, MAX_FPS, pickVideoConfig } from './turbo-video.js';
 import { applyEQ } from './turbo-audio.js';
 import { mixBg } from './bgm.js';
+import { isBgmAudioType, mixBgAudio } from './bgm-audio.js';
 
 /**
  * @param parts  [{ index, t0, t1, segs: [[s,e],...] }]  (secondes)
@@ -528,7 +529,12 @@ async function renderAllOnce(file, parts, opts, cb, accel) {
       // les réglages de voix. Couvre toute la partie (pas seulement les
       // raccords, contrairement à l'ancien son de transition).
       if (opts.bgm && opts.bgm.type !== 'none') {
-        mixBg(channels, aSR, opts.bgm.type, opts.bgm.gainDb);
+        // Ambiances « nature » (enregistrements, voir bgm-audio.js) vs
+        // ambiances synthétisées (bgm.js) : même mélange PCM, source
+        // différente. L'appelant (app.js) attend preloadBgmAudio() AVANT de
+        // lancer le rendu, donc mixBgAudio ne décode jamais à la volée ici.
+        if (isBgmAudioType(opts.bgm.type)) mixBgAudio(channels, aSR, opts.bgm.type, opts.bgm.gainDb);
+        else mixBg(channels, aSR, opts.bgm.type, opts.bgm.gainDb);
       }
 
       const aenc = new AudioEncoder({
