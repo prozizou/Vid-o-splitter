@@ -29,7 +29,7 @@
 
 // API consommée par app.js.
 export { turboSupported } from './turbo-util.js';
-export { turboAnalyze, WHINE_NOTCHES } from './turbo-audio.js';
+export { turboAnalyze, WHINE_NOTCHES, buildEqChain } from './turbo-audio.js';
 export { turboRenderAll } from './turbo-render.js';
 export { turboJoin, turboMerge } from './turbo-join.js';
 

@@ -2,8 +2,8 @@
 // un /vendor incomplet (build partiel) faisait échouer le chargement du module
 // entier — donc la page entière, moteur turbo compris. Il est chargé à la
 // demande dans getFFmpeg().
-import { turboSupported, turboAnalyze, turboRenderAll, turboJoin, turboMerge, WHINE_NOTCHES, bitrateFor, align16 } from './turbo.js';
-import { BGM_TYPES, makeBgWav } from './bgm.js';
+import { turboSupported, turboAnalyze, turboRenderAll, turboJoin, turboMerge, WHINE_NOTCHES, bitrateFor, align16, buildEqChain } from './turbo.js';
+import { BGM_TYPES, renderBgm, makeBgWav } from './bgm.js';
 import { BGM_AUDIO_TYPES, isBgmAudioType, preloadBgmAudio, renderBgmAudio, makeBgAudioWav } from './bgm-audio.js';
 import { segmentsFromLoud, thresholdCurve, planChunks, loudFromPCM } from './silence.js';
 import { fmtSize, fmtTime, probeDuration, attachLogTools } from './media.js';
@@ -167,6 +167,8 @@ const queueSection = $('queueSection'), queueList = $('queueList');
 const queueTag = $('queueTag'), queueHint = $('queueHint'), queueClear = $('queueClear');
 const analyzeBtn = $('analyzeBtn'), cutsSection = $('cutsSection');
 const cutsCanvas = $('cutsCanvas'), cutsTag = $('cutsTag'), cutsHint = $('cutsHint');
+const mixPreviewSection = $('mixPreviewSection'), mixPreviewBtn = $('mixPreviewBtn');
+const mixPreviewAuto = $('mixPreviewAuto'), mixPreviewTag = $('mixPreviewTag'), mixPreviewAudio = $('mixPreviewAudio');
 
 let sourceFiles = [];    // vidéos ajoutées par l'utilisateur, dans l'ordre de fusion
 let videoFile = null;    // fichier réellement traité (source unique OU fusion des sources)
@@ -184,6 +186,10 @@ let finalURL = null;
 let analysis = null;     // { key, loud, winSec, duration } — enveloppe RMS mise en cache
 let analyzing = false;
 let storageWarned = false;
+
+// Aperçu du rendu (voix + égaliseur + fond), voir ensureMixGraph/playMixPreview.
+let mixCtx = null, mixSrcNode = null, mixBgSrcNode = null, mixAudioURL = null;
+let mixStopTimer = null, mixPlaying = false, mixDebounce = null;
 
 // ==================== UTILITAIRES ====================
 // setTimeout est bridé à 1 s quand l'onglet passe en arrière-plan.
@@ -492,6 +498,7 @@ async function ensureBgmReady(type) {
     bgmSel.disabled = false;
     bgmTest.disabled = CONFIG.bgmType === 'none';
     paintBgm();
+    scheduleAutoPreview();
   }
 }
 
@@ -500,9 +507,13 @@ bgmSel.addEventListener('change', () => {
   bgmTest.disabled = CONFIG.bgmType === 'none';
   bgmGain.disabled = CONFIG.bgmType === 'none';
   paintBgm();
-  ensureBgmReady(CONFIG.bgmType);
+  ensureBgmReady(CONFIG.bgmType); // rappelle scheduleAutoPreview() une fois chargé (voir sa fin)
+  scheduleAutoPreview();
 });
-bgmGain.addEventListener('input', () => { CONFIG.bgmGainDb = +bgmGain.value; bgmGainVal.textContent = `${CONFIG.bgmGainDb} dB`; });
+bgmGain.addEventListener('input', () => {
+  CONFIG.bgmGainDb = +bgmGain.value; bgmGainVal.textContent = `${CONFIG.bgmGainDb} dB`;
+  scheduleAutoPreview();
+});
 bgmGainVal.textContent = `${CONFIG.bgmGainDb} dB`;
 bgmTest.disabled = true; bgmGain.disabled = true;
 paintBgm();
@@ -583,12 +594,13 @@ function paintEQ() {
 }
 function applyPreset(name) {
   const p = EQ_PRESETS[name];
-  if (!p) { EQ.preset = 'custom'; paintEQ(); return; }
+  if (!p) { EQ.preset = 'custom'; paintEQ(); scheduleAutoPreview(); return; }
   EQ.preset = name;
   EQ.gains = [...p.g];
   EQ.highpass = p.highpass;
   EQ.normalize = p.normalize;
   paintEQ();
+  scheduleAutoPreview();
 }
 eqPreset.addEventListener('change', () => applyPreset(eqPreset.value));
 eqBands.addEventListener('input', e => {
@@ -597,13 +609,14 @@ eqBands.addEventListener('input', e => {
   EQ.gains[i] = +e.target.value;
   EQ.preset = 'custom';
   paintEQ();
+  scheduleAutoPreview();
 });
-eqHighpass.addEventListener('change', () => { EQ.highpass = eqHighpass.checked; EQ.preset = 'custom'; paintEQ(); });
-eqNormalize.addEventListener('change', () => { EQ.normalize = eqNormalize.checked; EQ.preset = 'custom'; paintEQ(); });
-eqLinear.addEventListener('change', () => { EQ.linear = eqLinear.checked; });
+eqHighpass.addEventListener('change', () => { EQ.highpass = eqHighpass.checked; EQ.preset = 'custom'; paintEQ(); scheduleAutoPreview(); });
+eqNormalize.addEventListener('change', () => { EQ.normalize = eqNormalize.checked; EQ.preset = 'custom'; paintEQ(); scheduleAutoPreview(); });
+eqLinear.addEventListener('change', () => { EQ.linear = eqLinear.checked; }); // ffmpeg seulement : sans effet sur l'aperçu (Web Audio), pas de relecture
 // Pas de EQ.preset = 'custom' ici : comme eqLinear, c'est un reglage
 // independant du timbre choisi, pas une modification du preset.
-eqWhineNotch.addEventListener('change', () => { EQ.whineNotch = eqWhineNotch.checked; paintEQ(); });
+eqWhineNotch.addEventListener('change', () => { EQ.whineNotch = eqWhineNotch.checked; paintEQ(); scheduleAutoPreview(); });
 $('eqReset').addEventListener('click', () => applyPreset('flat'));
 paintEQ();
 
@@ -628,6 +641,119 @@ function audioChain(linear) {
   }
   if (EQ.normalize) f.push('dynaudnorm=f=250:g=7');
   return f;
+}
+
+// ==================== APERÇU DU RENDU (voix + égaliseur + fond) ====================
+// Une fois les coupes analysées, on peut vérifier à l'oreille le résultat
+// AVANT de lancer un traitement complet : on rejoue un vrai passage conservé
+// depuis la source originale, avec l'égaliseur et le son de fond actuels
+// appliqués en direct (Web Audio), et on relit automatiquement à chaque
+// réglage si « Ré-écouter automatiquement » est coché (voir scheduleAutoPreview,
+// branché sur les curseurs bgm/eq ci-dessus).
+//
+// Volontairement approximatif sur un point : on joue un segment conservé TEL
+// QUEL depuis la source (pas le recollage exact de toutes les parties gardées
+// comme le fera le rendu final) — largement suffisant pour juger d'un réglage
+// de timbre ou de volume, sans réimplémenter tout le pipeline de découpe.
+const MIX_PREVIEW_MAX_SEC = 8;
+
+/** Choisit le plus long passage conservé (le plus susceptible d'être de la
+ * parole franche plutôt qu'un souffle qui frôle le seuil), borné à 8 s. */
+function pickPreviewWindow() {
+  if (!analysis) return null;
+  const { loud, winSec, duration } = analysis;
+  const { segments } = segmentsFromLoud(loud, winSec, duration, silenceCfg());
+  if (!segments.length) return null;
+  let best = segments[0];
+  for (const s of segments) if (s[1] - s[0] > best[1] - best[0]) best = s;
+  const [s0, e0] = best;
+  return { start: s0, dur: Math.min(MIX_PREVIEW_MAX_SEC, e0 - s0) };
+}
+
+function setMixStatus(text) { mixPreviewTag.textContent = text; }
+
+function stopMixPreview() {
+  clearTimeout(mixStopTimer); mixStopTimer = null;
+  if (mixPlaying) { try { mixPreviewAudio.pause(); } catch {} mixPlaying = false; }
+  if (mixBgSrcNode) { try { mixBgSrcNode.stop(); } catch {} mixBgSrcNode = null; }
+  mixPreviewBtn.textContent = '▶️ Écouter un extrait avec ces réglages';
+}
+
+/** Referme tout (contexte + URL objet) : à appeler quand la source change,
+ * puisque le graphe est lié au fichier chargé au premier aperçu. */
+function resetMixGraph() {
+  stopMixPreview();
+  if (mixSrcNode) { try { mixSrcNode.disconnect(); } catch {} mixSrcNode = null; }
+  if (mixCtx) { mixCtx.close().catch(() => {}); mixCtx = null; }
+  if (mixAudioURL) { URL.revokeObjectURL(mixAudioURL); mixAudioURL = null; }
+  mixPreviewAudio.removeAttribute('src');
+}
+
+async function ensureMixGraph() {
+  if (mixCtx && mixSrcNode) return;
+  mixCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const file = await ensureMerged();
+  if (mixAudioURL) URL.revokeObjectURL(mixAudioURL);
+  mixAudioURL = URL.createObjectURL(file);
+  mixPreviewAudio.src = mixAudioURL;
+  mixSrcNode = mixCtx.createMediaElementSource(mixPreviewAudio);
+}
+
+async function playMixPreview() {
+  if (!sourceFiles.length || !analysis) return;
+  const win = pickPreviewWindow();
+  if (!win) { setMixStatus('Aucun passage conservé à prévisualiser.'); return; }
+
+  stopMixPreview();
+  await ensureMixGraph();
+
+  // Chaîne EQ reconstruite à chaque écoute (topologie identique à applyEQ,
+  // voir buildEqChain dans turbo-audio.js — même highpass/notch/bandes/
+  // compresseur que le rendu réel, pour que l'aperçu ne mente jamais).
+  try { mixSrcNode.disconnect(); } catch {}
+  const eqOut = buildEqChain(mixCtx, mixSrcNode, {
+    freqs: EQ_FREQS, gains: EQ.gains, q: EQ.q, highpass: EQ.highpass, normalize: EQ.normalize, whineNotch: EQ.whineNotch,
+  });
+  eqOut.connect(mixCtx.destination);
+
+  if (CONFIG.bgmType !== 'none') {
+    if (isBgmAudioType(CONFIG.bgmType)) {
+      try { await preloadBgmAudio(CONFIG.bgmType); } catch { /* silence si indisponible, pas d'erreur bloquante ici */ }
+    }
+    const n = Math.round(mixCtx.sampleRate * win.dur);
+    const bg = isBgmAudioType(CONFIG.bgmType)
+      ? renderBgmAudio(CONFIG.bgmType, mixCtx.sampleRate, n)
+      : renderBgm(CONFIG.bgmType, mixCtx.sampleRate, n);
+    if (bg.length) {
+      const bgBuf = mixCtx.createBuffer(1, bg.length, mixCtx.sampleRate);
+      bgBuf.copyToChannel(bg, 0);
+      const bgSrc = mixCtx.createBufferSource();
+      bgSrc.buffer = bgBuf;
+      const bgGain = mixCtx.createGain();
+      bgGain.gain.value = Math.pow(10, CONFIG.bgmGainDb / 20);
+      bgSrc.connect(bgGain); bgGain.connect(mixCtx.destination);
+      bgSrc.start();
+      mixBgSrcNode = bgSrc;
+    }
+  }
+
+  mixPreviewAudio.currentTime = win.start;
+  try { await mixPreviewAudio.play(); }
+  catch (e) { setMixStatus('Lecture bloquée par le navigateur : cliquez le bouton.'); return; }
+  mixPlaying = true;
+  mixPreviewBtn.textContent = '⏹️ Arrêter';
+  setMixStatus(`▶️ ${fmtTime(win.start)} – ${fmtTime(win.start + win.dur)}`);
+  mixStopTimer = setTimeout(stopMixPreview, win.dur * 1000 + 150);
+}
+
+mixPreviewBtn.addEventListener('click', () => { mixPlaying ? stopMixPreview() : playMixPreview().catch(e => setMixStatus('❌ ' + (e.message || e))); });
+
+// Debounce : plusieurs réglages bougés vite (glisser un curseur) ne doivent
+// relancer la lecture qu'une fois, pas à chaque valeur intermédiaire.
+function scheduleAutoPreview() {
+  if (!mixPreviewAuto.checked || mixPreviewSection.classList.contains('hidden')) return;
+  clearTimeout(mixDebounce);
+  mixDebounce = setTimeout(() => { playMixPreview().catch(() => {}); }, 400);
 }
 
 // ==================== FICHIER(S) ====================
@@ -677,6 +803,8 @@ async function sourcesChanged() {
   analysis = null;
   sourceDims = null;   // dimensions sondées pour l'estimation : périmées si la source change
   cutsSection.classList.add('hidden');
+  mixPreviewSection.classList.add('hidden');
+  resetMixGraph(); // le graphe d'aperçu est lié au fichier chargé : périmé si la source change
   resetOutput();
   renderQueue();
 
@@ -1126,6 +1254,7 @@ analyzeBtn.addEventListener('click', async () => {
   try {
     await ensureAnalysis();
     cutsSection.classList.remove('hidden');
+    mixPreviewSection.classList.remove('hidden');
     refreshCuts();
     paintProgress(1);
     setStatus('👀 Aperçu prêt. Ajustez les réglages : l\'aperçu se met à jour sans rien recalculer.');
@@ -1375,6 +1504,7 @@ function refreshPartsTag() {
 // ==================== FLUX PRINCIPAL ====================
 processBtn.addEventListener('click', async () => {
   if (!sourceFiles.length || running) return;
+  stopMixPreview(); // pas d'aperçu qui joue par-dessus le vrai traitement
   running = true; paused = false;
   processBtn.disabled = true;
   pauseBtn.classList.remove('hidden');
@@ -1422,6 +1552,7 @@ processBtn.addEventListener('click', async () => {
 
       // L'aperçu reflète ce qui va réellement être produit.
       cutsSection.classList.remove('hidden');
+      mixPreviewSection.classList.remove('hidden');
       refreshCuts();
 
       const fresh = planChunks(segments, duration, chunkOpts());

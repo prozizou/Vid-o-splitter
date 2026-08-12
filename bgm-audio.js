@@ -15,7 +15,7 @@
    (vercel.json) l'empêcherait de toute façon.
    ========================================================================== */
 
-import { mixInto, pcmMonoToWavBlob, loopToLength, resampleLinear, dbToLin } from './bgm.js';
+import { mixInto, pcmMonoToWavBlob, loopToLength, resampleLinear, trimSilence, dbToLin } from './bgm.js';
 
 export const BGM_AUDIO_TYPES = {
   birds:  "Forêt — chants d'oiseaux",
@@ -70,7 +70,13 @@ export async function preloadBgmAudio(type) {
       const d = buf.getChannelData(c);
       for (let i = 0; i < n; i++) mono[i] += d[i] / buf.numberOfChannels;
     }
-    cache.set(type, { samples: mono, sr: buf.sampleRate });
+    // Les deux enregistrements fournis commencent par plusieurs secondes de
+    // silence numérique pur (carton d'intro) : sans ce nettoyage, l'écoute
+    // (3 s, voir bgmTest dans app.js) tombe quasi systématiquement dedans, et
+    // le bouclage (loopToLength) réintroduit ce trou à chaque répétition
+    // plutôt qu'une seule fois. Coupé UNE fois ici, en cache.
+    const trimmed = trimSilence(mono, buf.sampleRate);
+    cache.set(type, { samples: trimmed, sr: buf.sampleRate });
   })();
 
   pending.set(type, p);
