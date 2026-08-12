@@ -12,6 +12,12 @@
    - moteur turbo  : mélangé directement dans le PCM de la partie (mixBg) ;
    - moteur ffmpeg : un WAV de la durée de la partie, mixé via amix (voir
      makeBgWav et app.js).
+
+   Ce fichier reste PUR (aucune API du navigateur) pour rester testable dans
+   `npm test`. Les ambiances basées sur de vrais enregistrements (voir
+   bgm-audio.js, qui a besoin de fetch()/AudioContext pour décoder les
+   fichiers) réutilisent les briques ci-dessous (dbToLin, mixInto,
+   pcmMonoToWavBlob, loopToLength, resampleLinear) au lieu de les dupliquer.
    ========================================================================== */
 
 export const BGM_TYPES = {
@@ -118,18 +124,18 @@ export function renderBgm(type, sr, n) {
   return out;
 }
 
-const dbToLin = db => Math.pow(10, db / 20);
+export const dbToLin = db => Math.pow(10, db / 20);
 
 /**
- * Mélange un son de fond dans des canaux PCM existants (sur place), sur
- * toute leur longueur. Même signal mono sur tous les canaux.
+ * Mélange un lit sonore mono `bg` dans des canaux PCM existants (sur place),
+ * avec gain et écrêtage. Même signal appliqué à tous les canaux. Brique
+ * commune à mixBg (ambiances synthétisées) et mixBgAudio (enregistrements,
+ * voir bgm-audio.js) : seule la façon de PRODUIRE `bg` diffère entre les deux.
  * @param channels [Float32Array, ...]
  */
-export function mixBg(channels, sr, type, gainDb) {
-  if (!type || type === 'none' || !channels.length || !channels[0].length) return;
-  const n = channels[0].length;
-  const bg = renderBgm(type, sr, n);
-  if (!bg.length) return;
+export function mixInto(channels, bg, gainDb) {
+  if (!bg.length || !channels.length || !channels[0].length) return;
+  const n = Math.min(bg.length, channels[0].length);
   const gain = dbToLin(gainDb);
   for (const ch of channels) {
     for (let i = 0; i < n; i++) {
@@ -138,6 +144,37 @@ export function mixBg(channels, sr, type, gainDb) {
       ch[i] = v;
     }
   }
+}
+
+/**
+ * Mélange un son de fond dans des canaux PCM existants (sur place), sur
+ * toute leur longueur. Même signal mono sur tous les canaux.
+ * @param channels [Float32Array, ...]
+ */
+export function mixBg(channels, sr, type, gainDb) {
+  if (!type || type === 'none' || !channels.length || !channels[0].length) return;
+  const bg = renderBgm(type, sr, channels[0].length);
+  mixInto(channels, bg, gainDb);
+}
+
+/** Encode un signal mono déjà au format voulu (crête ≤ 1,0) en WAV 16 bits.
+ * Brique commune à makeBgWav et makeBgAudioWav (voir bgm-audio.js). */
+export function pcmMonoToWavBlob(samples, sr) {
+  const n = samples.length;
+  const bytes = 44 + n * 2;
+  const ab = new ArrayBuffer(bytes);
+  const v = new DataView(ab);
+  const wr = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  wr(0, 'RIFF'); v.setUint32(4, bytes - 8, true); wr(8, 'WAVE');
+  wr(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true);
+  v.setUint16(22, 1, true); v.setUint32(24, sr, true);
+  v.setUint32(28, sr * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  wr(36, 'data'); v.setUint32(40, n * 2, true);
+  for (let i = 0, o = 44; i < n; i++, o += 2) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    v.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return new Blob([ab], { type: 'audio/wav' });
 }
 
 /** Fabrique un WAV mono de `totalSec`, le son de fond seul, au volume
@@ -152,19 +189,61 @@ export function makeBgWav(totalSec, sr, type, gainDb) {
     if (v > 1) v = 1; else if (v < -1) v = -1;
     bed[i] = v;
   }
+  return pcmMonoToWavBlob(bed, sr);
+}
 
-  const bytes = 44 + n * 2;
-  const ab = new ArrayBuffer(bytes);
-  const v = new DataView(ab);
-  const wr = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
-  wr(0, 'RIFF'); v.setUint32(4, bytes - 8, true); wr(8, 'WAVE');
-  wr(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true);
-  v.setUint16(22, 1, true); v.setUint32(24, sr, true);
-  v.setUint32(28, sr * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
-  wr(36, 'data'); v.setUint32(40, n * 2, true);
-  for (let i = 0, o = 44; i < n; i++, o += 2) {
-    const s = Math.max(-1, Math.min(1, bed[i]));
-    v.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+/**
+ * Boucle `samples` (mono, durée FIXE et courte — un enregistrement) pour
+ * remplir exactement `n` échantillons, avec un fondu-enchaîné à chaque
+ * raccord de boucle : contrairement aux ambiances synthétisées ci-dessus
+ * (calculées d'un bout à l'autre, jamais bouclées), un enregistrement réel a
+ * une durée fixe (quelques minutes) qu'il faut répéter pour couvrir une
+ * partie plus longue — le fondu-enchaîné est ce qui évite un « clic »
+ * audible à chaque reprise du fichier.
+ */
+export function loopToLength(samples, sr, n, xfadeSec = 2) {
+  if (!(n > 0)) return new Float32Array(0);
+  const len = samples.length;
+  if (!len) return new Float32Array(n);
+  if (n <= len) return samples.slice(0, n);
+
+  const xfade = Math.max(1, Math.min(Math.round(xfadeSec * sr), len >> 1));
+  const out = new Float32Array(n);
+  out.set(samples.subarray(0, Math.min(len, n)), 0);
+  let pos = len;
+  while (pos < n) {
+    // Fondu-enchaîné : la fin de ce qui est déjà écrit (`xfade` échantillons)
+    // est mélangée avec le DÉBUT du même enregistrement, qui reprend juste
+    // après — le raccord de boucle disparaît, même sur un cycle répété
+    // plusieurs fois pour couvrir une longue partie.
+    const start = pos - xfade;
+    const room = n - start;
+    const fadeN = Math.min(xfade, room);
+    for (let i = 0; i < fadeN; i++) {
+      const t = i / xfade;
+      out[start + i] = out[start + i] * (1 - t) + samples[i] * t;
+    }
+    const remain = Math.min(len - xfade, n - (start + fadeN));
+    if (remain > 0) out.set(samples.subarray(xfade, xfade + remain), start + fadeN);
+    pos = start + fadeN + remain;
   }
-  return new Blob([ab], { type: 'audio/wav' });
+  return out;
+}
+
+/** Ré-échantillonnage linéaire simple mono. Suffisant pour un lit sonore de
+ * fond (pas de contenu haute fréquence critique) : évite de redécoder un
+ * enregistrement à chaque fréquence d'échantillonnage demandée par les deux
+ * moteurs (44100 Hz fixe côté ffmpeg, celle de la source côté turbo). */
+export function resampleLinear(samples, srcSr, dstSr) {
+  if (!samples.length || srcSr === dstSr) return samples;
+  const dstLen = Math.max(1, Math.round(samples.length * dstSr / srcSr));
+  const out = new Float32Array(dstLen);
+  const ratio = (samples.length - 1) / Math.max(1, dstLen - 1);
+  for (let i = 0; i < dstLen; i++) {
+    const pos = i * ratio;
+    const i0 = Math.floor(pos), i1 = Math.min(i0 + 1, samples.length - 1);
+    const t = pos - i0;
+    out[i] = samples[i0] * (1 - t) + samples[i1] * t;
+  }
+  return out;
 }

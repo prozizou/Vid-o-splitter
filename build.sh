@@ -16,9 +16,10 @@ mkdir -p dist/vendor
 cp index.html splitter.html \
    app.js turbo.js turbo-util.js turbo-mp4.js turbo-video.js \
    turbo-audio.js turbo-render.js turbo-join.js \
-   silence.js media.js bgm.js sw-register.js \
+   silence.js media.js bgm.js bgm-audio.js sw-register.js \
    style.css manifest.webmanifest sw.js dist/
 cp -R icons dist/icons
+cp -R audio dist/audio
 
 # ---------------------------------------------------------------------------
 # vendor.lock : <paquet> <version> <integrity>
@@ -130,6 +131,7 @@ REQUIRED=(
   "dist/silence.js"
   "dist/media.js"
   "dist/bgm.js"
+  "dist/bgm-audio.js"
   "dist/sw-register.js"
   "dist/sw.js"
   "dist/vendor/ffmpeg/index.js"
@@ -138,6 +140,8 @@ REQUIRED=(
   "dist/vendor/core-mt/ffmpeg-core.wasm"
   "dist/vendor/mp4box/mp4box.all.js"
   "dist/vendor/mp4-muxer/mp4-muxer.mjs"
+  "dist/audio/bgm-foret.m4a"
+  "dist/audio/bgm-jungle.m4a"
 )
 missing=0
 for f in "${REQUIRED[@]}"; do

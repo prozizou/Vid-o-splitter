@@ -4,6 +4,7 @@
 // demande dans getFFmpeg().
 import { turboSupported, turboAnalyze, turboRenderAll, turboJoin, turboMerge, WHINE_NOTCHES, bitrateFor, align16 } from './turbo.js';
 import { BGM_TYPES, makeBgWav } from './bgm.js';
+import { BGM_AUDIO_TYPES, isBgmAudioType, preloadBgmAudio, renderBgmAudio, makeBgAudioWav } from './bgm-audio.js';
 import { segmentsFromLoud, thresholdCurve, planChunks, loudFromPCM } from './silence.js';
 import { fmtSize, fmtTime, probeDuration, attachLogTools } from './media.js';
 
@@ -432,26 +433,74 @@ if (socialSel) {
 }
 
 // --- Son de fond ---
+// Deux familles dans le même sélecteur : ambiances SYNTHÉTISÉES (BGM_TYPES,
+// bgm.js — aucun fichier, calculées à la volée) et ambiances ENREGISTRÉES
+// (BGM_AUDIO_TYPES, bgm-audio.js — vrais sons de forêt/oiseaux/jungle,
+// chargés une fois depuis /audio puis mis en cache). Même curseur de volume,
+// même case à cocher, seule la provenance du son change.
 const bgmSel = $('bgm'), bgmGain = $('bgmGain'), bgmGainVal = $('bgmGainVal'), bgmTest = $('bgmTest');
+const BGM_LABELS = { ...BGM_TYPES, ...BGM_AUDIO_TYPES };
 
-for (const [k, label] of Object.entries(BGM_TYPES)) {
-  const o = document.createElement('option');
-  o.value = k; o.textContent = label;
-  bgmSel.appendChild(o);
+{
+  const noneOpt = document.createElement('option');
+  noneOpt.value = 'none'; noneOpt.textContent = BGM_TYPES.none;
+  bgmSel.appendChild(noneOpt);
+
+  const synthGroup = document.createElement('optgroup');
+  synthGroup.label = 'Synthétisées';
+  for (const [k, label] of Object.entries(BGM_TYPES)) {
+    if (k === 'none') continue;
+    const o = document.createElement('option');
+    o.value = k; o.textContent = label;
+    synthGroup.appendChild(o);
+  }
+  bgmSel.appendChild(synthGroup);
+
+  const natureGroup = document.createElement('optgroup');
+  natureGroup.label = 'Nature (enregistrements)';
+  for (const [k, label] of Object.entries(BGM_AUDIO_TYPES)) {
+    const o = document.createElement('option');
+    o.value = k; o.textContent = label;
+    natureGroup.appendChild(o);
+  }
+  bgmSel.appendChild(natureGroup);
 }
 bgmSel.value = CONFIG.bgmType;
 
 const bgmTag = $('bgmTag');
 function paintBgm() {
   const on = CONFIG.bgmType !== 'none';
-  bgmTag.textContent = on ? BGM_TYPES[CONFIG.bgmType] : 'Aucun';
+  bgmTag.textContent = on ? BGM_LABELS[CONFIG.bgmType] : 'Aucun';
   bgmTag.classList.toggle('tag-on', on);
 }
+
+// Précharge (fetch + décodage) une ambiance enregistrée dès qu'elle est
+// choisie, plutôt qu'au moment du rendu : l'utilisateur voit l'erreur tout
+// de suite si le fichier est inaccessible, et le traitement démarre sans
+// attente supplémentaire (le cache de bgm-audio.js est déjà chaud).
+async function ensureBgmReady(type) {
+  if (!isBgmAudioType(type)) return;
+  const prevLabel = bgmTag.textContent;
+  bgmSel.disabled = true; bgmTest.disabled = true;
+  bgmTag.textContent = 'Chargement…';
+  try {
+    await preloadBgmAudio(type);
+  } catch (e) {
+    log(`⚠️ ${e.message || e}`);
+    CONFIG.bgmType = 'none'; bgmSel.value = 'none';
+  } finally {
+    bgmSel.disabled = false;
+    bgmTest.disabled = CONFIG.bgmType === 'none';
+    paintBgm();
+  }
+}
+
 bgmSel.addEventListener('change', () => {
   CONFIG.bgmType = bgmSel.value;
   bgmTest.disabled = CONFIG.bgmType === 'none';
   bgmGain.disabled = CONFIG.bgmType === 'none';
   paintBgm();
+  ensureBgmReady(CONFIG.bgmType);
 });
 bgmGain.addEventListener('input', () => { CONFIG.bgmGainDb = +bgmGain.value; bgmGainVal.textContent = `${CONFIG.bgmGainDb} dB`; });
 bgmGainVal.textContent = `${CONFIG.bgmGainDb} dB`;
@@ -461,9 +510,17 @@ paintBgm();
 // Écoute de l'ambiance choisie (3 s), sans rien traiter.
 bgmTest.addEventListener('click', async () => {
   if (CONFIG.bgmType === 'none') return;
-  const { renderBgm } = await import('./bgm.js');
   const ctx = new (window.AudioContext || window.webkitAudioContext)();
-  const s = renderBgm(CONFIG.bgmType, ctx.sampleRate, Math.round(ctx.sampleRate * 3));
+  const n = Math.round(ctx.sampleRate * 3);
+  let s;
+  if (isBgmAudioType(CONFIG.bgmType)) {
+    await ensureBgmReady(CONFIG.bgmType);
+    if (CONFIG.bgmType === 'none') { await ctx.close().catch(() => {}); return; } // préchargement en échec
+    s = renderBgmAudio(CONFIG.bgmType, ctx.sampleRate, n);
+  } else {
+    const { renderBgm } = await import('./bgm.js');
+    s = renderBgm(CONFIG.bgmType, ctx.sampleRate, n);
+  }
   const buf = ctx.createBuffer(1, s.length, ctx.sampleRate);
   const d = buf.getChannelData(0);
   const g = Math.pow(10, CONFIG.bgmGainDb / 20) * 6; // remonté pour l'écoute seule
@@ -1133,7 +1190,12 @@ async function renderChunk(ff, inPath, c) {
   if (CONFIG.bgmType !== 'none') {
     const partDur = c.segs.reduce((a, [s, e]) => a + (e - s), 0);
     const { fetchFile } = await import('/vendor/util/index.js');
-    const wav = makeBgWav(partDur, 44100, CONFIG.bgmType, CONFIG.bgmGainDb);
+    // Ambiances enregistrées (bgm-audio.js) vs synthétisées (bgm.js) : même
+    // WAV mono en sortie, source différente. makeBgAudioWav précharge si le
+    // cache n'était pas déjà chaud (ne devrait pas arriver, voir processBtn).
+    const wav = isBgmAudioType(CONFIG.bgmType)
+      ? await makeBgAudioWav(partDur, 44100, CONFIG.bgmType, CONFIG.bgmGainDb)
+      : makeBgWav(partDur, 44100, CONFIG.bgmType, CONFIG.bgmGainDb);
     await ff.writeFile('bg.wav', await fetchFile(wav));
     bgWritten = true;
   }
@@ -1323,6 +1385,21 @@ processBtn.addEventListener('click', async () => {
 
   let input = null, ff = null;
   try {
+
+    // --- Son de fond « nature » : préchargé AVANT le rendu -----------
+    // Le moteur turbo mélange le son de fond de façon SYNCHRONE (mixBgAudio,
+    // voir turbo-render.js) : le fichier doit déjà être décodé et en cache
+    // quand le rendu démarre. Normalement déjà fait (sélection du panneau),
+    // ce n'est ici qu'un filet de sécurité (reprise de session, par ex.).
+    if (isBgmAudioType(CONFIG.bgmType)) {
+      setStatus('🎧 Préparation du son de fond…');
+      try {
+        await preloadBgmAudio(CONFIG.bgmType);
+      } catch (e) {
+        log(`⚠️ Son de fond indisponible, désactivé pour ce traitement : ${e.message || e}`);
+        CONFIG.bgmType = 'none'; bgmSel.value = 'none'; paintBgm();
+      }
+    }
 
     // --- 0. Fusion des sources (transparente pour la suite) --------
     // Après cette étape, videoFile est UNE vidéo (source unique ou fusion),

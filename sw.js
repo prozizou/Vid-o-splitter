@@ -31,6 +31,7 @@
 const VERSION = '__BUILD_VERSION__';
 const SHELL_CACHE  = `shell-${VERSION}`;
 const VENDOR_CACHE = `vendor-${VERSION}`;
+const AUDIO_CACHE  = `audio-${VERSION}`;
 
 // URL PROPRES (sans .html) : c'est ce que sert Vercel avec cleanUrls.
 const PAGES = ['/', '/splitter'];
@@ -47,6 +48,7 @@ const ASSETS = [
   '/silence.js',
   '/media.js',
   '/bgm.js',
+  '/bgm-audio.js',
   '/sw-register.js',
   '/style.css',
   '/manifest.webmanifest',
@@ -86,7 +88,7 @@ self.addEventListener('activate', event => {
   event.waitUntil((async () => {
     const keys = await caches.keys();
     await Promise.all(
-      keys.filter(k => k !== SHELL_CACHE && k !== VENDOR_CACHE).map(k => caches.delete(k))
+      keys.filter(k => k !== SHELL_CACHE && k !== VENDOR_CACHE && k !== AUDIO_CACHE).map(k => caches.delete(k))
     );
     await self.clients.claim();
   })());
@@ -137,6 +139,22 @@ self.addEventListener('fetch', event => {
   if (url.pathname.startsWith('/vendor/')) {
     event.respondWith((async () => {
       const cache = await caches.open(VENDOR_CACHE);
+      const hit = await cache.match(req);
+      if (hit) return hit;
+      const res = await fetch(req);
+      if (res.ok) cache.put(req, res.clone()).catch(() => {});
+      return res;
+    })());
+    return;
+  }
+
+  // --- Ambiances « nature » (enregistrements) : même traitement que /vendor/
+  // ci-dessus, cache-first rempli au premier choix dans le panneau Son de
+  // fond — pas de précache au démarrage, ce sont de gros fichiers (~3,5 Mo
+  // chacun) que la plupart des sessions n'utiliseront jamais.
+  if (url.pathname.startsWith('/audio/')) {
+    event.respondWith((async () => {
+      const cache = await caches.open(AUDIO_CACHE);
       const hit = await cache.match(req);
       if (hit) return hit;
       const res = await fetch(req);
