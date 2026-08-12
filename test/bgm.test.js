@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { BGM_TYPES, renderBgm, mixBg, makeBgWav, loopToLength, resampleLinear, mixInto, pcmMonoToWavBlob } from '../bgm.js';
+import { BGM_TYPES, renderBgm, mixBg, makeBgWav, loopToLength, resampleLinear, mixInto, pcmMonoToWavBlob, trimSilence } from '../bgm.js';
 
 const SR = 48000;
 const peakOf = a => a.reduce((m, v) => Math.max(m, Math.abs(v)), 0);
@@ -168,6 +168,50 @@ test('resampleLinear conserve une rampe simple (interpolation correcte)', () => 
   assert.ok(Math.abs(out[0] - 0) < 1e-6);
   assert.ok(Math.abs(out[out.length - 1] - 1) < 1e-6);
   for (let i = 1; i < out.length; i++) assert.ok(out[i] >= out[i - 1] - 1e-9, 'la rampe doit rester croissante');
+});
+
+// --- Coupe du silence de tête/queue (trimSilence) ---------------------------
+// Bug réel corrigé : les enregistrements fournis commencent par plusieurs
+// secondes de silence numérique pur (carton d'intro) — sans ce nettoyage,
+// l'écoute de 3 s (bgmTest) tombe systématiquement dedans, et le bouclage
+// (loopToLength) réintroduit ce trou à chaque répétition.
+
+function withSilence(realStartSec, realLenSec, silenceAfterSec = 0, sr = SR) {
+  const start = Math.round(realStartSec * sr);
+  const realLen = Math.round(realLenSec * sr);
+  const tailSilence = Math.round(silenceAfterSec * sr);
+  const out = new Float32Array(start + realLen + tailSilence);
+  for (let i = 0; i < realLen; i++) out[start + i] = 0.2 * Math.sin(i); // "signal" audible
+  return out;
+}
+
+test('trimSilence coupe le silence numérique en tête', () => {
+  const s = withSilence(3, 2); // 3 s de silence, puis 2 s de signal
+  const out = trimSilence(s, SR);
+  assert.ok(out.length < s.length, 'le résultat doit être plus court que la source');
+  assert.ok(out.length <= Math.round(2.2 * SR), `${out.length} ne doit garder quasiment que les 2 s de signal`);
+});
+
+test('trimSilence coupe aussi en queue', () => {
+  const s = withSilence(0, 2, 3); // signal puis 3 s de silence
+  const out = trimSilence(s, SR);
+  assert.ok(out.length <= Math.round(2.2 * SR), `${out.length} ne doit garder quasiment que les 2 s de signal`);
+});
+
+test('trimSilence ne touche pas un enregistrement déjà sans silence de bord', () => {
+  const s = withSilence(0, 2, 0);
+  const out = trimSilence(s, SR);
+  assert.equal(out.length, s.length);
+});
+
+test('trimSilence ne renvoie jamais un tableau vide (silence total = pas de coupe)', () => {
+  const s = new Float32Array(SR); // silence total
+  const out = trimSilence(s, SR);
+  assert.equal(out.length, s.length);
+});
+
+test('trimSilence : cas limites sans planter', () => {
+  assert.equal(trimSilence(new Float32Array(0), SR).length, 0);
 });
 
 // --- Briques partagées (mixInto, pcmMonoToWavBlob) --------------------------

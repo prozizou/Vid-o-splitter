@@ -193,6 +193,37 @@ export function makeBgWav(totalSec, sr, type, gainDb) {
 }
 
 /**
+ * Coupe le silence numérique en tête/queue d'un enregistrement (mono),
+ * détecté par RMS sur des fenêtres de `winSec` (défaut 100 ms) sous `rmsMin`.
+ * Beaucoup d'enregistrements « ambiance » commencent par plusieurs secondes
+ * de silence pur (carton d'intro, export mal coupé...) : sans ce nettoyage,
+ * la prévisualisation (3 s, voir bgm-audio.js) tomberait souvent dedans, et
+ * le bouclage (loopToLength) réintroduirait ce trou à chaque répétition
+ * plutôt qu'une seule fois au tout début de la partie.
+ * N'écrête RIEN si le signal entier est sous le seuil (silence total, ou
+ * seuil mal choisi) : mieux vaut garder l'original que renvoyer du vide.
+ */
+export function trimSilence(samples, sr, rmsMin = 0.001, winSec = 0.1) {
+  const n = samples.length;
+  if (!n) return samples;
+  const win = Math.max(1, Math.round(winSec * sr));
+  const rms = (from, to) => {
+    let sum = 0;
+    for (let i = from; i < to; i++) sum += samples[i] * samples[i];
+    return Math.sqrt(sum / (to - from));
+  };
+
+  let start = 0;
+  while (start + win <= n && rms(start, start + win) < rmsMin) start += win;
+  let end = n;
+  while (end - win >= start && rms(end - win, end) < rmsMin) end -= win;
+
+  if (start === 0 && end === n) return samples;
+  if (start >= end) return samples; // tout est sous le seuil : ne rien couper
+  return samples.slice(start, end);
+}
+
+/**
  * Boucle `samples` (mono, durée FIXE et courte — un enregistrement) pour
  * remplir exactement `n` échantillons, avec un fondu-enchaîné à chaque
  * raccord de boucle : contrairement aux ambiances synthétisées ci-dessus

@@ -57,6 +57,16 @@
     <small class="hint" id="cutsHint">Les zones claires sont conservées, les zones sombres supprimées. Bougez les réglages : l'aperçu suit en direct.</small>
   </section>
 
+  <section class="cuts hidden" id="mixPreviewSection">
+    <div class="cuts-head">
+      <b>🎧 Aperçu du rendu</b>
+      <span class="tag" id="mixPreviewTag">—</span>
+    </div>
+    <button class="btn btn-ghost btn-small" id="mixPreviewBtn" type="button">▶️ Écouter un extrait avec ces réglages</button>
+    <label class="check"><input type="checkbox" id="mixPreviewAuto"> Ré-écouter automatiquement à chaque réglage</label>
+    <small class="hint" id="mixPreviewHint">Rejoue un passage réellement conservé de la voix, avec l'égaliseur et le son de fond ci-dessous appliqués en direct — pour entendre le résultat avant de lancer un traitement complet.</small>
+  </section>
+
   <div class="controls">
     <div class="control">
       <label>Sensibilité (garde les passages plus doux) <b id="sensVal">1.0×</b></label>
@@ -182,6 +192,11 @@
 
   <video id="preview" class="preview hidden" controls playsinline preload="metadata"></video>
   <a class="btn hidden" id="downloadLink" download="video_sans_silence.mp4">⬇️ Enregistrer la vidéo finale</a>
+
+  <!-- Source de l'aperçu du rendu (voix + égaliseur + fond, voir mixPreviewSection) :
+       jamais affiché, son audio est capté par Web Audio (createMediaElementSource)
+       pour passer dans la même chaîne de filtres que le rendu final. -->
+  <audio id="mixPreviewAudio" class="hidden" preload="none"></audio>
 
   <div class="log hidden" id="logOutput" role="log" aria-label="Journal technique"></div>
 </div>

@@ -93,19 +93,17 @@ export const WHINE_NOTCHES = [
 
 // ==================== ÉGALISEUR (OfflineAudioContext) ====================
 // Filtres biquad natifs du navigateur : rapides et de bonne qualité.
-async function applyEQ(channels, sampleRate, eq) {
-  const active = eq.gains.some(g => g !== 0) || eq.highpass || eq.normalize || eq.whineNotch;
-  if (!active || !channels[0].length) return channels;
 
-  const n = channels[0].length;
-  const ctx = new OfflineAudioContext(channels.length, n, sampleRate);
-  const buf = ctx.createBuffer(channels.length, n, sampleRate);
-  channels.forEach((c, i) => buf.copyToChannel(c, i));
-
-  const src = ctx.createBufferSource();
-  src.buffer = buf;
-  let node = src;
-
+/**
+ * Chaîne highpass -> anti-sifflement -> bandes -> compresseur, à partir de
+ * `node` (déjà connecté à sa source). `ctx` peut être un OfflineAudioContext
+ * (rendu, voir applyEQ ci-dessous) ou un AudioContext temps réel (aperçu du
+ * mix AVANT traitement, voir ensureMixGraph dans app.js) : l'API des noeuds
+ * biquad est identique dans les deux cas. Partagée entre les deux pour que
+ * l'aperçu entende EXACTEMENT le même traitement que le rendu final — jamais
+ * une approximation qui divergerait au fil des évolutions de l'un des deux.
+ */
+export function buildEqChain(ctx, node, eq) {
   if (eq.highpass) {
     const hp = ctx.createBiquadFilter();
     hp.type = 'highpass'; hp.frequency.value = 85; hp.Q.value = 0.7;
@@ -134,6 +132,22 @@ async function applyEQ(channels, sampleRate, eq) {
     const makeup = ctx.createGain(); makeup.gain.value = 1.6;
     node.connect(comp); comp.connect(makeup); node = makeup;
   }
+  return node;
+}
+
+async function applyEQ(channels, sampleRate, eq) {
+  const active = eq.gains.some(g => g !== 0) || eq.highpass || eq.normalize || eq.whineNotch;
+  if (!active || !channels[0].length) return channels;
+
+  const n = channels[0].length;
+  const ctx = new OfflineAudioContext(channels.length, n, sampleRate);
+  const buf = ctx.createBuffer(channels.length, n, sampleRate);
+  channels.forEach((c, i) => buf.copyToChannel(c, i));
+
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+
+  const node = buildEqChain(ctx, src, eq);
   node.connect(ctx.destination);
   src.start();
 
