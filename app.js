@@ -169,6 +169,29 @@ const analyzeBtn = $('analyzeBtn'), cutsSection = $('cutsSection');
 const cutsCanvas = $('cutsCanvas'), cutsTag = $('cutsTag'), cutsHint = $('cutsHint');
 const mixPreviewSection = $('mixPreviewSection'), mixPreviewBtn = $('mixPreviewBtn');
 const mixPreviewAuto = $('mixPreviewAuto'), mixPreviewTag = $('mixPreviewTag'), mixPreviewAudio = $('mixPreviewAudio');
+const videoCard = $('videoCard'), videoThumb = $('videoThumb'), videoName = $('videoName'), videoMeta = $('videoMeta');
+const cutsStats = $('cutsStats'), cutsStatsHeadline = $('cutsStatsHeadline'), cutsStatsSub = $('cutsStatsSub');
+const actionBar = $('actionBar'), diagnosticTag = $('diagnosticTag');
+
+/**
+ * Bouton principal CONTEXTUEL : un seul des trois candidats (analyzeBtn,
+ * processBtn, downloadLink) est visible à la fois, sans toucher à leur
+ * logique respective (activé/désactivé, libellé dynamique « Reprendre… »,
+ * « Retraiter… ») qui reste gérée ailleurs, inchangée. Ne fait QUE choisir
+ * lequel montrer, selon l'état déjà suivi par le reste de l'app :
+ *   - avant toute analyse : « Analyser la vidéo »
+ *   - une fois l'aperçu des coupes disponible (analysis) ou une session
+ *     reprise (job) : « Couper les silences » (processBtn, avec son propre
+ *     libellé dynamique de reprise/retraitement)
+ * downloadLink garde sa visibilité déjà gérée par ailleurs (resetOutput /
+ * finalizeOutput) : on ne la touche pas ici, elle vient simplement s'ajouter
+ * dans la même barre, visible dès que le rendu final est prêt.
+ */
+function refreshPrimaryAction() {
+  const ready = !!(analysis || job);
+  analyzeBtn.classList.toggle('hidden', ready);
+  processBtn.classList.toggle('hidden', !ready);
+}
 
 let sourceFiles = [];    // vidéos ajoutées par l'utilisateur, dans l'ordre de fusion
 let videoFile = null;    // fichier réellement traité (source unique OU fusion des sources)
@@ -212,6 +235,10 @@ function log(msg) {
   logOutput.classList.remove('hidden');
   logOutput.textContent += msg + '\n';
   logOutput.scrollTop = logOutput.scrollHeight;
+  if (diagnosticTag) {
+    const n = logOutput.textContent.trim() ? logOutput.textContent.trim().split('\n').length : 0;
+    diagnosticTag.textContent = n ? `${n} ligne${n > 1 ? 's' : ''}` : '—';
+  }
 }
 
 // ==================== PROGRESSION ====================
@@ -389,9 +416,34 @@ const bind = (id, valId, fmt, key, affectsCuts = false) => {
   };
   el.addEventListener('input', upd); upd();
 };
-bind('sens', 'sensVal', v => `${(+v).toFixed(1)}×`, 'sensitivity', true);
-bind('sil',  'silVal',  v => `${(+v).toFixed(2)} s`, 'minSilenceDur', true);
-bind('pad',  'padVal',  v => `${(+v).toFixed(2)} s`, 'padding', true);
+
+/** Comme bind(), mais synchronise un <input type=number> à côté du curseur au
+ * lieu d'un simple texte : l'utilisateur peut taper une valeur précise sans
+ * tâtonner sur le curseur (voir la maquette de refonte — Sensibilité, Silence
+ * minimum, Marge voix). Les deux champs restent la SEULE source de vérité
+ * l'un pour l'autre via CONFIG[key], jamais désynchronisés. */
+const bindSlider = (id, numId, key, decimals, affectsCuts = false) => {
+  const el = $(id), num = $(numId);
+  const apply = v => {
+    v = Math.min(+el.max, Math.max(+el.min, v));
+    CONFIG[key] = v;
+    el.value = v;
+    num.value = v.toFixed(decimals);
+    if (affectsCuts) queueCutsRefresh();
+  };
+  el.addEventListener('input', () => apply(parseFloat(el.value)));
+  num.addEventListener('input', () => {
+    const v = parseFloat(num.value);
+    if (!Number.isNaN(v)) apply(v);
+  });
+  // Champ vidé/valeur invalide au moment de quitter le champ : on réaffiche
+  // la dernière valeur valide plutôt que de laisser un champ vide.
+  num.addEventListener('blur', () => { num.value = (+CONFIG[key]).toFixed(decimals); });
+  apply(parseFloat(el.value));
+};
+bindSlider('sens', 'sensNum', 'sensitivity', 1, true);
+bindSlider('sil',  'silNum',  'minSilenceDur', 2, true);
+bindSlider('pad',  'padNum',  'padding', 2, true);
 // affectsCuts=true : la qualité vidéo ne change pas le découpage, mais la
 // taille de fichier ESTIMÉE affichée sous le sélecteur réseau social en
 // dépend — queueCutsRefresh() est le mécanisme déjà en place pour recalculer
@@ -816,21 +868,34 @@ async function sourcesChanged() {
   if (sourceFiles.length === 0) {
     processBtn.disabled = true;
     analyzeBtn.disabled = true;
-    processBtn.textContent = '🔪 Détecter et couper les silences';
+    processBtn.textContent = 'Couper les silences';
     setStatus('');
+    videoCard.classList.add('hidden');
+    refreshPrimaryAction();
     return;
   }
   processBtn.disabled = false;
   analyzeBtn.disabled = false;
   processBtn.textContent = sourceFiles.length > 1
-    ? '🔗 Fusionner puis couper les silences'
-    : '🔪 Détecter et couper les silences';
+    ? 'Fusionner puis couper les silences'
+    : 'Couper les silences';
+  refreshPrimaryAction();
 
   if (sourceFiles.length === 1) {
     setStatus(`✅ Vidéo chargée : ${sourceFiles[0].name} (${fmtSize(sourceFiles[0].size)})`);
   } else {
     setStatus(`✅ ${sourceFiles.length} vidéos — elles seront fusionnées dans l'ordre affiché.`);
   }
+
+  // Carte vidéo : miniature + infos essentielles. Toujours basée sur le
+  // PREMIER fichier (même en fusion) — c'est la vignette la plus utile pour
+  // se repérer, le détail des autres fichiers est déjà dans la file d'attente.
+  videoCard.classList.remove('hidden');
+  const label = sourceFiles.length === 1 ? sourceFiles[0].name : `${sourceFiles.length} vidéos à fusionner`;
+  const sigAtThumb = srcSig();
+  updateVideoCard(sourceFiles[0], label).then(() => {
+    if (srcSig() !== sigAtThumb) return; // la liste a changé pendant la sonde
+  }).catch(() => {});
 
   // Estimation de la durée totale (indicatif, pour le mode « parties automatiques »).
   const sigAtProbe = srcSig();
@@ -974,12 +1039,58 @@ function probeSize(file) {
   });
 }
 
+/**
+ * Remplit la carte vidéo (miniature + nom + durée/résolution/taille/format).
+ * La miniature est capturée à ~10 % de la durée plutôt qu'à l'image 0 : le
+ * tout premier instant est souvent un fondu ou un écran noir sur beaucoup de
+ * sources, peu représentatif du contenu. Échoue en silence (miniature vide,
+ * infos textuelles quand même affichées) : ce n'est qu'un agrément visuel,
+ * jamais bloquant pour le reste du flux.
+ */
+function updateVideoCard(file, label) {
+  return new Promise(resolve => {
+    const v = document.createElement('video');
+    const u = URL.createObjectURL(file);
+    let done = false;
+    const finish = () => { if (done) return; done = true; URL.revokeObjectURL(u); resolve(); };
+    v.preload = 'metadata'; v.muted = true; v.playsInline = true;
+    v.onloadedmetadata = () => {
+      const w = v.videoWidth, h = v.videoHeight, dur = v.duration || 0;
+      videoName.textContent = label;
+      videoMeta.textContent = [
+        dur ? fmtTime(dur) : null,
+        w && h ? `${Math.min(w, h)}p` : null,
+        fmtSize(file.size),
+        (file.name.split('.').pop() || '').toUpperCase() || null,
+      ].filter(Boolean).join(' · ');
+      const t = isFinite(dur) ? Math.min(1, dur * 0.1) : 0;
+      if (t > 0) { try { v.currentTime = t; return; } catch {} }
+      finish();
+    };
+    v.onseeked = () => {
+      try {
+        const cw = videoThumb.width, ch = videoThumb.height;
+        const cr = cw / ch, vr = v.videoWidth / v.videoHeight;
+        // Cadrage « cover » : remplit la miniature sans déformer l'image.
+        let sw = v.videoWidth, sh = v.videoHeight, sx = 0, sy = 0;
+        if (vr > cr) { sw = sh * cr; sx = (v.videoWidth - sw) / 2; }
+        else { sh = sw / cr; sy = (v.videoHeight - sh) / 2; }
+        videoThumb.getContext('2d').drawImage(v, sx, sy, sw, sh, 0, 0, cw, ch);
+      } catch {} // capture refusée (rare) : la carte reste utile sans miniature
+      finish();
+    };
+    v.onerror = finish;
+    v.src = u;
+  });
+}
+
 function resetOutput() {
   if (finalURL) { URL.revokeObjectURL(finalURL); finalURL = null; }
   releasePartUrls();
   preview.pause(); preview.removeAttribute('src'); preview.load();
   preview.classList.add('hidden');
   downloadLink.classList.add('hidden');
+  processBtn.classList.add('btn-primary'); processBtn.classList.remove('btn-ghost');
   partsSection.classList.add('hidden');
   partsList.innerHTML = '';
   finalInfoSection.classList.add('hidden');
@@ -1011,7 +1122,8 @@ async function tryResume() {
     `<b>Session précédente retrouvée.</b> ${doneCount}/${chunks.length} parties déjà traitées.
      <button class="btn btn-ghost" id="dropResume" type="button">Repartir de zéro</button>`;
   $('dropResume').addEventListener('click', async () => {
-    await dbWipe(); job = null; resetOutput(); resumeBanner.classList.add('hidden');
+    await dbWipe(); job = null; analysis = null; resetOutput(); resumeBanner.classList.add('hidden');
+    refreshPrimaryAction();
   });
 
   job = {
@@ -1046,6 +1158,7 @@ async function tryResume() {
   paintEQ();
 
   renderParts();
+  refreshPrimaryAction(); // job restauré : le bouton principal passe direct à "Couper les silences"
   if (doneCount === chunks.length) {
     processBtn.textContent = '🔁 Retraiter la vidéo';
     // Job entièrement terminé mais jamais assemblé (page rechargée avant la
@@ -1210,11 +1323,21 @@ function refreshCuts() {
 
   const removed = duration - kept;
   const pct = duration > 0 ? Math.round((removed / duration) * 100) : 0;
-  cutsTag.textContent = `${segments.length} segments`;
+  cutsTag.textContent = `${segments.length} segment${segments.length > 1 ? 's' : ''}`;
+
+  // Nombre de silences RETIRÉS (les trous entre segments conservés — et avant
+  // le premier / après le dernier s'ils ne couvrent pas toute la vidéo) :
+  // différent du nombre de segments CONSERVÉS ci-dessus (cutsTag).
+  let silences = Math.max(0, segments.length - 1);
+  if (segments.length && segments[0][0] > 1e-3) silences++;
+  if (segments.length && segments[segments.length - 1][1] < duration - 1e-3) silences++;
+
+  cutsStats.classList.remove('hidden');
+  cutsStatsHeadline.textContent = `${silences} silence${silences > 1 ? 's' : ''} détecté${silences > 1 ? 's' : ''}`;
+  cutsStatsSub.textContent = `${fmtTime(removed)} supprimées · ${fmtTime(kept)} conservées (−${pct} %)`;
+
   cutsHint.textContent =
-    `${fmtTime(removed)} de silence retiré sur ${fmtTime(duration)} (−${pct} %) → ` +
-    `${fmtTime(kept)} de vidéo finale, en ${parts.length} partie(s). ` +
-    `Zones claires = conservées, zones sombres = supprimées.`;
+    `Zones claires = conservées, zones sombres = supprimées. Vidéo finale en ${parts.length} partie(s).`;
 
   // En moteur compatible, une partie s'arrête aussi au bout d'un certain nombre
   // de segments : sans cette phrase, l'utilisateur qui demande « 4 minutes » et
@@ -1284,6 +1407,7 @@ analyzeBtn.addEventListener('click', async () => {
     cutsSection.classList.remove('hidden');
     mixPreviewSection.classList.remove('hidden');
     refreshCuts();
+    refreshPrimaryAction();
     paintProgress(1);
     setStatus('👀 Aperçu prêt. Ajustez les réglages : l\'aperçu se met à jour sans rien recalculer.');
     cutsSection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -1293,7 +1417,7 @@ analyzeBtn.addEventListener('click', async () => {
   } finally {
     analyzing = false;
     analyzeBtn.disabled = false;
-    analyzeBtn.textContent = '🔍 Aperçu des coupes';
+    analyzeBtn.textContent = 'Analyser la vidéo';
     showProgress(false);
   }
 });
@@ -1547,6 +1671,7 @@ processBtn.addEventListener('click', async () => {
   processBtn.disabled = true;
   pauseBtn.classList.remove('hidden');
   logOutput.textContent = '';
+  if (diagnosticTag) diagnosticTag.textContent = '—';
   showProgress(true); paintProgress(0);
   await askNotify();
   await keepAwake(true);
@@ -1845,6 +1970,10 @@ async function finalizeOutput(standalone) {
     finalURL = URL.createObjectURL(blob);
     preview.src = finalURL; preview.classList.remove('hidden'); preview.load();
     downloadLink.href = finalURL; downloadLink.classList.remove('hidden');
+    // « Exporter » devient l'action principale une fois le rendu prêt ; « ↻
+    // Retraiter » (processBtn) reste disponible mais passe en secondaire —
+    // sinon deux boutons de même poids visuel dans la même barre.
+    processBtn.classList.remove('btn-primary'); processBtn.classList.add('btn-ghost');
     const keptSec = job.chunks.reduce((a, c) => a + c.kept, 0);
     renderFinalInfo(blob, job, keptSec);
     setStatus(`🎉 Vidéo finale prête — ${fmtSize(blob.size)}.`);

@@ -34,6 +34,15 @@
     <input type="file" id="fileInput" accept="video/*" multiple>
   </div>
 
+  <!-- Carte vidéo : miniature + infos essentielles, dès qu'un fichier est chargé. -->
+  <section class="video-card hidden" id="videoCard">
+    <canvas id="videoThumb" class="video-thumb" width="160" height="90"></canvas>
+    <div class="video-info">
+      <b class="video-name" id="videoName"></b>
+      <span class="video-meta" id="videoMeta"></span>
+    </div>
+  </section>
+
   <section class="queue hidden" id="queueSection">
     <div class="queue-head">
       <b>Vidéos à fusionner <span class="tag" id="queueTag">0</span></b>
@@ -43,43 +52,66 @@
     <small class="hint" id="queueHint"></small>
   </section>
 
-  <div class="actions actions-preview">
-    <button class="btn btn-ghost" id="analyzeBtn" type="button" disabled>🔍 Aperçu des coupes</button>
-  </div>
-
   <section class="cuts hidden" id="cutsSection">
     <div class="cuts-head">
-      <b>Aperçu des coupes</b>
+      <b>Timeline</b>
       <span class="tag" id="cutsTag">—</span>
     </div>
     <canvas id="cutsCanvas" class="cuts-canvas" width="1200" height="130"
             role="img" aria-label="Aperçu du son : passages conservés et silences supprimés"></canvas>
-    <small class="hint" id="cutsHint">Les zones claires sont conservées, les zones sombres supprimées. Bougez les réglages : l'aperçu suit en direct.</small>
-  </section>
-
-  <section class="cuts hidden" id="mixPreviewSection">
-    <div class="cuts-head">
-      <b>🎧 Aperçu du rendu</b>
-      <span class="tag" id="mixPreviewTag">—</span>
+    <div class="cuts-stats hidden" id="cutsStats">
+      <b id="cutsStatsHeadline"></b>
+      <span id="cutsStatsSub"></span>
     </div>
-    <button class="btn btn-ghost btn-small" id="mixPreviewBtn" type="button">▶️ Écouter un extrait avec ces réglages</button>
-    <label class="check"><input type="checkbox" id="mixPreviewAuto"> Ré-écouter automatiquement à chaque réglage</label>
-    <small class="hint" id="mixPreviewHint">Rejoue un passage réellement conservé de la voix, avec l'égaliseur et le son de fond ci-dessous appliqués en direct — pour entendre le résultat avant de lancer un traitement complet.</small>
+    <small class="hint" id="cutsHint">Zones claires = conservées, zones sombres = supprimées. Bougez les réglages : l'aperçu suit en direct.</small>
   </section>
 
+  <h2 class="section-title">Détection</h2>
   <div class="controls">
     <div class="control">
-      <label>Sensibilité (garde les passages plus doux) <b id="sensVal">1.0×</b></label>
-      <input type="range" id="sens" min="0.5" max="2.5" step="0.1" value="1.0">
+      <label>Sensibilité (garde les passages plus doux)</label>
+      <div class="control-row">
+        <input type="range" id="sens" min="0.5" max="2.5" step="0.1" value="1.0">
+        <span class="control-num"><input type="number" id="sensNum" min="0.5" max="2.5" step="0.1" value="1.0"><b>×</b></span>
+      </div>
     </div>
     <div class="control">
-      <label>Silence minimum à couper <b id="silVal">0.40 s</b></label>
-      <input type="range" id="sil" min="0.15" max="2" step="0.05" value="0.4">
+      <label>Silence minimum à couper</label>
+      <div class="control-row">
+        <input type="range" id="sil" min="0.15" max="2" step="0.05" value="0.4">
+        <span class="control-num"><input type="number" id="silNum" min="0.15" max="2" step="0.05" value="0.4"><b>s</b></span>
+      </div>
     </div>
     <div class="control">
-      <label>Marge conservée autour de la voix <b id="padVal">0.08 s</b></label>
-      <input type="range" id="pad" min="0" max="0.3" step="0.01" value="0.08">
+      <label>Marge conservée autour de la voix</label>
+      <div class="control-row">
+        <input type="range" id="pad" min="0" max="0.3" step="0.01" value="0.08">
+        <span class="control-num"><input type="number" id="padNum" min="0" max="0.3" step="0.01" value="0.08"><b>s</b></span>
+      </div>
     </div>
+  </div>
+
+  <details class="panel" id="bgmPanel">
+    <summary>🎵 Son de fond <span class="tag" id="bgmTag">Aucun</span></summary>
+
+    <div class="control">
+      <label for="bgm">Ambiance</label>
+      <select id="bgm"></select>
+      <small class="hint">Les ambiances « Nature » sont de vrais enregistrements (chargés une fois au choix, puis mis en cache) ; les autres sont générées à la volée, sans aucun fichier.</small>
+    </div>
+
+    <div class="control">
+      <label>Volume <b id="bgmGainVal">-24 dB</b></label>
+      <input type="range" id="bgmGain" min="-40" max="-6" step="1" value="-24">
+      <small class="hint">Mélangé sous la voix, après l'égaliseur, sur toute la durée. Volume bas par défaut : c'est un fond, pas de la musique au premier plan.</small>
+    </div>
+
+    <button class="btn btn-ghost btn-small" id="bgmTest" type="button">🔊 Écouter l'ambiance</button>
+  </details>
+
+  <details class="panel panel-advanced" id="advancedPanel">
+    <summary>⚙️ Réglages avancés</summary>
+
     <div class="control">
       <label for="engine">Moteur</label>
       <select id="engine">
@@ -116,47 +148,36 @@
       </select>
       <small class="hint">Les frontières tombent toujours dans un silence supprimé. En moteur turbo, une vidéo de moins de 20&nbsp;min reste en <b>une seule partie</b> : chaque frontière coûte une couture, autant en faire le moins possible. Choisissez « Une seule partie » pour l'imposer.</small>
     </div>
-  </div>
 
-  <details class="panel" id="bgmPanel">
-    <summary>🎵 Son de fond <span class="tag" id="bgmTag">Aucun</span></summary>
+    <div class="subpanel" id="eqPanel">
+      <div class="subpanel-head"><b>🎚️ Égaliseur voix</b> <span class="tag" id="eqTag">Neutre</span></div>
 
-    <div class="control">
-      <label for="bgm">Ambiance</label>
-      <select id="bgm"></select>
-      <small class="hint">Les ambiances « Nature » sont de vrais enregistrements (chargés une fois au choix, puis mis en cache) ; les autres sont générées à la volée, sans aucun fichier.</small>
+      <div class="control">
+        <label for="eqPreset">Préréglage</label>
+        <select id="eqPreset">
+          <option value="flat" selected>Neutre (aucun traitement)</option>
+          <option value="clear">Voix claire</option>
+          <option value="podcast">Podcast chaud</option>
+          <option value="denoise">Anti-bruit / anti-souffle</option>
+          <option value="custom">Personnalisé</option>
+        </select>
+      </div>
+
+      <div class="eq-bands" id="eqBands"></div>
+
+      <label class="check"><input type="checkbox" id="eqHighpass"> Couper les basses parasites (&lt; 85 Hz)</label>
+      <label class="check"><input type="checkbox" id="eqNormalize"> Égaliser le volume entre les passages</label>
+      <label class="check"><input type="checkbox" id="eqLinear"> Phase linéaire (plus fidèle, plus lent)</label>
+      <label class="check"><input type="checkbox" id="eqWhineNotch"> Filtre anti-sifflement écran (~6,9 kHz / ~8,4 kHz)</label>
+      <button class="btn btn-ghost btn-small" id="eqReset" type="button">Remettre à plat</button>
     </div>
 
-    <div class="control">
-      <label>Volume <b id="bgmGainVal">-24 dB</b></label>
-      <input type="range" id="bgmGain" min="-40" max="-6" step="1" value="-24">
-      <small class="hint">Mélangé sous la voix, après l'égaliseur, sur toute la durée. Volume bas par défaut : c'est un fond, pas de la musique au premier plan.</small>
+    <div class="subpanel" id="mixPreviewSection">
+      <div class="subpanel-head"><b>🎧 Aperçu du rendu</b> <span class="tag" id="mixPreviewTag">—</span></div>
+      <button class="btn btn-ghost btn-small" id="mixPreviewBtn" type="button">▶️ Écouter un extrait avec ces réglages</button>
+      <label class="check"><input type="checkbox" id="mixPreviewAuto"> Ré-écouter automatiquement à chaque réglage</label>
+      <small class="hint" id="mixPreviewHint">Rejoue un passage réellement conservé de la voix, avec l'égaliseur et le son de fond ci-dessus appliqués en direct — pour entendre le résultat avant de lancer un traitement complet.</small>
     </div>
-
-    <button class="btn btn-ghost btn-small" id="bgmTest" type="button">🔊 Écouter l'ambiance</button>
-  </details>
-
-  <details class="panel" id="eqPanel">
-    <summary>🎚️ Égaliseur voix <span class="tag" id="eqTag">Neutre</span></summary>
-
-    <div class="control">
-      <label for="eqPreset">Préréglage</label>
-      <select id="eqPreset">
-        <option value="flat" selected>Neutre (aucun traitement)</option>
-        <option value="clear">Voix claire</option>
-        <option value="podcast">Podcast chaud</option>
-        <option value="denoise">Anti-bruit / anti-souffle</option>
-        <option value="custom">Personnalisé</option>
-      </select>
-    </div>
-
-    <div class="eq-bands" id="eqBands"></div>
-
-    <label class="check"><input type="checkbox" id="eqHighpass"> Couper les basses parasites (&lt; 85 Hz)</label>
-    <label class="check"><input type="checkbox" id="eqNormalize"> Égaliser le volume entre les passages</label>
-    <label class="check"><input type="checkbox" id="eqLinear"> Phase linéaire (plus fidèle, plus lent)</label>
-    <label class="check"><input type="checkbox" id="eqWhineNotch"> Filtre anti-sifflement écran (~6,9 kHz / ~8,4 kHz)</label>
-    <button class="btn btn-ghost" id="eqReset" type="button">Remettre à plat</button>
   </details>
 
   <div id="status" role="status" aria-live="polite" aria-atomic="true"></div>
@@ -169,11 +190,6 @@
     <span id="progressPct">0 %</span>
     <span id="progressPhase"></span>
     <span id="progressEta"></span>
-  </div>
-
-  <div class="actions">
-    <button class="btn" id="processBtn" disabled>🔪 Détecter et couper les silences</button>
-    <button class="btn btn-ghost hidden" id="pauseBtn">⏸️ Mettre en pause</button>
   </div>
 
   <section class="parts hidden" id="partsSection">
@@ -191,14 +207,27 @@
   </section>
 
   <video id="preview" class="preview hidden" controls playsinline preload="metadata"></video>
-  <a class="btn hidden" id="downloadLink" download="video_sans_silence.mp4">⬇️ Enregistrer la vidéo finale</a>
+
+  <!-- Bouton principal, contextuel : son libellé/action change selon l'état
+       (Analyser -> Couper -> Exporter), un seul visible à la fois. Fixé en
+       bas de l'écran sur mobile (voir .action-bar dans style.css). -->
+  <div class="action-bar" id="actionBar">
+    <button class="btn btn-primary" id="analyzeBtn" type="button" disabled>Analyser la vidéo</button>
+    <button class="btn btn-primary hidden" id="processBtn" disabled>Couper les silences</button>
+    <a class="btn btn-primary hidden" id="downloadLink" download="video_sans_silence.mp4">⬇️ Exporter la vidéo</a>
+    <button class="btn btn-ghost hidden" id="pauseBtn">⏸️ Mettre en pause</button>
+  </div>
 
   <!-- Source de l'aperçu du rendu (voix + égaliseur + fond, voir mixPreviewSection) :
        jamais affiché, son audio est capté par Web Audio (createMediaElementSource)
        pour passer dans la même chaîne de filtres que le rendu final. -->
   <audio id="mixPreviewAudio" class="hidden" preload="none"></audio>
 
-  <div class="log hidden" id="logOutput" role="log" aria-label="Journal technique"></div>
+  <details class="panel" id="diagnosticPanel">
+    <summary>🩺 Diagnostic <span class="tag" id="diagnosticTag">—</span></summary>
+    <small class="hint">Journal technique : utile surtout pour signaler un problème. Sans intérêt pour un usage normal.</small>
+    <div class="log hidden" id="logOutput" role="log" aria-label="Journal technique"></div>
+  </details>
 </div>
 
 <script type="module" src="app.js"></script>
